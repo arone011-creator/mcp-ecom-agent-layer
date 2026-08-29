@@ -8,8 +8,13 @@ and — from Phase 2 onward — the agents themselves.
 
 **[→ Technical Snapshot](docs/TECHNICAL_SNAPSHOT.txt)** — the whole service
 in one document: architecture, the nine tools, the security model,
-deployment and known limits. Every section has a plain-language summary,
-so it reads for technical and non-technical audiences alike.
+deployment and known limits.
+
+**[→ Iterations](docs/ITERATIONS.txt)** — how it was built: what worked,
+what failed, and how to replicate this service from scratch.
+
+Both carry a plain-language summary in every section, so they read for
+technical and non-technical audiences alike.
 
 ## What this is
 

@@ -1,0 +1,481 @@
+================================================================================
+ITERATIONS - mcp-ecom-agent-layer
+How this service was actually built. Phase 1, 29 August 2026.
+================================================================================
+
+The technical snapshot says what this service IS. This document says how it got
+that way: what worked, what broke, and how somebody new would rebuild it.
+
+It is deliberately unflattering. Two of the most important bugs here were
+invisible to a fully passing test suite, and one design in the original plan
+turned out to be unbuildable. Those are the useful parts.
+
+Every section ends with an "IN PLAIN TERMS" note. A non-technical reader can
+follow this entire document by reading only those.
+
+    IN PLAIN TERMS
+    The other document explains what was built. This one explains how it
+    went, including what went wrong. The failures are the most useful part -
+    they are the things nobody would have predicted.
+
+
+CONTENTS
+--------
+     1. The order the work was done in
+     2. What worked
+     3. What failed - the plan was wrong about its own system
+     4. What failed - bugs only a running server could reveal
+     5. What failed - small things that cost time
+     6. What is still not proven
+     7. How to replicate this service from scratch
+     8. What we would do differently
+     9. What comes next
+
+
+================================================================================
+1. THE ORDER THE WORK WAS DONE IN
+================================================================================
+
+Twelve tasks, each ending in a commit, each reviewed before the next began.
+Three of them changed the STOREFRONT, not this service.
+
+    TASK   WHAT IT DID                                       WHERE
+    -----  ------------------------------------------------  ------------
+    1      Add an endpoint so a non-JS client can ask         storefront
+           "who am I"
+    2      Let a caller request a short-lived token           storefront
+    3      Make cart adds and cancellations safe to retry     storefront
+    4      Project skeleton and the API client                here
+    5      Response models                                    here
+    6      The six low-risk read tools                        here
+    7      The two medium-risk cart tools                     here
+    8      Approval tokens, then cancel_order behind them     here
+    9      The server: nine tools over HTTP                   here
+    10     Deploy as a second service                         Railway
+    11     Sweep every tool against production, record it     both
+    12     Update the documents this work made wrong          storefront
+
+THE IMPORTANT DISCOVERY IN THAT TABLE: three tasks are in the storefront. The
+plan assumed this milestone would be purely additive - build an adapter over an
+API that already existed. It was not. Two of the plan's own requirements
+(short-lived tokens, retry safety) had NO server-side component at all, and a
+third (identity) could not be met the way the plan described.
+
+Building the adapter first and discovering that later would have meant faking
+all three.
+
+    IN PLAIN TERMS
+    The work was done in twelve steps, with a review after each one. A
+    quarter of them turned out to be changes to the SHOP rather than to this
+    service - the plan had assumed the shop already did things it did not.
+    Finding that out first, rather than halfway through, is why it did not
+    become a mess.
+
+
+================================================================================
+2. WHAT WORKED
+================================================================================
+
+(a) WRITING THE PLAN AGAINST THE REAL CODE
+
+    The plan was written by reading the actual API routes, not the design
+    documents describing them. That caught three things the design had wrong
+    about its own system before any code depended on them:
+
+      * money arrives as a string, not a number;
+      * adding to a cart INCREASES the line, it does not replace it;
+      * an order you do not own returns 404, not 403.
+
+    A plan written from the documentation would have shipped all three as
+    bugs, in a layer where "the AI got the price wrong" is hard to trace.
+
+(b) A VERIFICATION STEP FOR EVERY KNOWN UNKNOWN
+
+    The plan called four functions from a library it had not yet installed.
+    Rather than assume, Task 4 Step 2 was a probe: install the library, check
+    each function exists, and fix the plan before writing code against it.
+
+    Three of the four were as assumed. The fourth was wrong - the client class
+    takes no `headers` argument; headers belong on the transport. That would
+    have failed in Task 11, against a live deployment, five tasks later.
+
+(c) MUTATION TESTING ON EVERYTHING SECURITY-RELATED
+
+    The approval system was verified by deliberately weakening it. Replacing
+    the argument binding with a simple "is a token present" check failed four
+    tests, including the one that tries to spend an approval for order #3 on
+    order #7.
+
+    That is the difference between a test suite that describes the design and
+    one that defends it.
+
+(d) STOPPING AFTER EVERY TASK
+
+    Each task ended with a report: what passed, what deviated from the plan,
+    and what needed a decision. Four design decisions came out of those
+    checkpoints rather than being made silently mid-implementation.
+
+(e) BUILDING NO AI AT ALL
+
+    Nine tools, zero agents. When something failed it was a tool problem, full
+    stop - there was no reasoning layer to blame or to hide behind.
+
+    IN PLAIN TERMS
+    Five things that worked. The most valuable was checking assumptions
+    against reality before building on them - both the shop's actual
+    behaviour and the libraries used. Several problems were found while they
+    were still cheap, rather than after a week of work rested on them.
+
+
+================================================================================
+3. WHAT FAILED - THE PLAN WAS WRONG ABOUT ITS OWN SYSTEM
+================================================================================
+
+THE IDENTITY DESIGN WAS UNBUILDABLE AS SPECIFIED.
+
+    The design said this server would verify the user's sign-in token itself,
+    using the shared secret. Reasonable-sounding, and wrong.
+
+    NextAuth version 4 does not SIGN its tokens, it ENCRYPTS them - a JWE
+    using AES-256-GCM with a key derived through HKDF-SHA256. Reading the user
+    out of one in Python would have meant a second implementation of that
+    cryptography, in a different language, which would break silently the day
+    NextAuth changed a detail.
+
+    That is precisely the duplicated-rule failure the whole adapter principle
+    exists to prevent - and the design document was asking for it.
+
+    RESOLVED by adding one endpoint to the storefront: GET /api/v1/auth/whoami.
+    The token stays opaque here; this service forwards it and asks who it
+    belongs to. One implementation of identity, still in the shop.
+
+THE SESSION IDENTIFIER COULD NOT BE SUPPLIED BY THE CALLER.
+
+    The design had this service reading a session id from a header the client
+    sends. The first live connection failed immediately with "Session
+    terminated".
+
+    The reason: `mcp-session-id` is part of the MCP protocol itself. The SERVER
+    issues it when a client connects; a client that invents its own is
+    claiming a session that does not exist.
+
+    This turned out BETTER than what was designed. The session identity is now
+    assigned by the server, so a caller cannot choose it - and approval tokens
+    are bound to something the caller cannot forge.
+
+    IN PLAIN TERMS
+    Two parts of the design could not be built as written. The first assumed
+    this service could read the customer's sign-in pass; in fact those passes
+    are encrypted, and teaching a second program to open them would have
+    created exactly the duplicated-rules problem the whole design was meant
+    to avoid. The fix was to stop trying and simply ask the shop. The second
+    was a naming collision with the protocol itself - and the accident
+    produced a more secure result than the plan.
+
+
+================================================================================
+4. WHAT FAILED - BUGS ONLY A RUNNING SERVER COULD REVEAL
+================================================================================
+
+Two bugs passed every test and broke everything in production.
+
+(1) THE FRAMEWORK QUIETLY DELETED THE HEADER THE SECURITY MODEL DEPENDS ON.
+
+    FastMCP's header accessor strips `mcp-session-id` by default, listing it
+    among "MCP-related headers" it removes. That header is the session
+    identity approval tokens are scoped to.
+
+    RESULT: every single order cancellation failed with "a session id is
+    required", while ALL NINETEEN unit tests passed - because the pure
+    functions being tested were never wrong. The wiring around them was.
+
+    Found by starting the server and calling it. Fixed by requesting all
+    headers explicitly, and pinned with a test that asserts that specific
+    flag, since the flag IS the bug.
+
+(2) THE PRIVATE NETWORK WAS INCOMPATIBLE WITH THE SHOP'S OWN SECURITY RULE.
+
+    Railway offers a private internal address so two services can talk without
+    going out to the public internet. Switching to it broke every product
+    lookup with a redirect error.
+
+    The cause: the storefront upgrades any non-HTTPS request to HTTPS. On the
+    public internet a proxy marks requests as already secure. Internally there
+    is no proxy, so every internal call was redirected to an address that does
+    not speak HTTPS at all.
+
+    Worse - and this is the part worth remembering - A MANUAL CHECK HAD
+    REPORTED IT WORKING. The readiness probe asked "does the service answer?",
+    and the OLD container, still using the public address, answered yes. The
+    measurement was of the thing being replaced.
+
+    Only a script that exercised every tool exposed it.
+
+    THE LESSON, TWICE OVER: "it responds" is not "the new version responds",
+    and a check that a human eyeballs once is not a check.
+
+    IN PLAIN TERMS
+    Two bugs broke the live service while every test passed. The first: the
+    framework silently removed a piece of information the security system
+    depends on, so no order could be cancelled - and the tests could not see
+    it because they tested the pieces, not the wiring. The second: a
+    networking change broke everything, and a quick manual check reported it
+    as working because it had accidentally measured the OLD version still
+    running. Both were only caught by a script that exercised everything for
+    real.
+
+
+================================================================================
+5. WHAT FAILED - SMALL THINGS THAT COST TIME
+================================================================================
+
+    * TESTS IN THE WRONG TEST PROJECT. A test importing an API route was
+      placed in the browser-simulating suite, which has no `Request` object.
+      It failed on import, not on logic.
+
+    * MOCKS THAT DID NOT RETURN PROMISES. Two failures looked like broken
+      retry-safety code and were actually a mock returning `undefined` where
+      the real database returns a promise. The implementation was correct
+      throughout.
+
+    * A PROMISE RETURNED FROM INSIDE A `try` BLOCK. Wrapping a route handler
+      changed `return f()` into something whose failure escaped the
+      surrounding error handling - which would have put a raw database error,
+      including the connection string, into an HTTP response. Caught by an
+      existing test written for exactly that risk. One missing keyword.
+
+    * A DEAD LINE OF CODE LEFT BY A SLOPPY EDIT, found by reading the file
+      back rather than trusting the edit.
+
+    THE PATTERN: none of these were design problems. All four were caught by
+    running things and reading results, and three of them by tests that
+    already existed for other reasons.
+
+    IN PLAIN TERMS
+    Four small mistakes, all found quickly. The most serious would have
+    printed the database password into an error message shown to a user -
+    caught by a test somebody had written earlier for that exact worry. Small
+    guards, written once, keep paying.
+
+
+================================================================================
+6. WHAT IS STILL NOT PROVEN
+================================================================================
+
+Recorded here rather than glossed over.
+
+    VERIFIED AGAINST THE LIVE SYSTEM
+        search_products, get_product, check_inventory.
+        cancel_order refusing a missing approval, and a forged one.
+
+    VERIFIED ONLY AGAINST SIMULATIONS
+        get_orders, get_order, get_cart, add_to_cart, remove_from_cart,
+        and cancel_order's SUCCESS path.
+
+    Those six need a signed-in customer, and no demo login was available when
+    the milestone closed. It is one command to close:
+
+        python scripts/sweep.py --url <mcp>/mcp --api <shop> \
+               --email <demo> --password <pass>
+
+    This matters more than it looks. FOUR separate bugs in this project were
+    found by live calls and missed by a full test suite. "Passes against
+    mocks" is a weaker claim than it sounds.
+
+    IN PLAIN TERMS
+    Three of the nine actions are proven against the real, live shop. Six are
+    proven only against a simulation, because testing them needs a real
+    customer login that was not available. That is written down as a gap
+    rather than quietly rounded up - especially since four bugs in this
+    project were invisible to simulations and obvious the moment something
+    real was called.
+
+
+================================================================================
+7. HOW TO REPLICATE THIS SERVICE FROM SCRATCH
+================================================================================
+
+For somebody new, assuming a working storefront with an HTTP API already
+exists. If it does not, start with the ITERATIONS document in the mcp-ecom
+repository first - this layer cannot be built before that one.
+
+PREREQUISITES
+
+    Python 3.11+, Git, a GitHub account, a Railway account.
+    A storefront with a versioned HTTP API and token-based authentication.
+
+STEP 0 - CHECK WHAT THE API ACTUALLY DOES, NOT WHAT ITS DOCS SAY
+
+    Call every endpoint you intend to wrap and record the real responses.
+    Specifically check:
+
+      * What type is money? A string and a float are different bugs.
+      * Do "add to cart" semantics increment, or replace?
+      * What does the API return for a record the caller does not own?
+      * Can you obtain a token as a program, without a browser?
+      * Can you learn WHO a token belongs to? If the tokens are encrypted -
+        NextAuth v4 encrypts, it does not merely sign - you will need the API
+        to tell you, because re-implementing that decryption is a trap.
+
+    Every one of those five questions changed this design.
+
+STEP 1 - CLOSE THE GAPS IN THE API FIRST
+
+    Three things this layer needed that did not exist:
+
+      * an endpoint that answers "who am I" for a bearer token;
+      * the ability to request a SHORT-LIVED token, because a token given to
+        an AI cannot be revoked;
+      * idempotency keys on any write, so a timeout can be retried safely.
+
+    Build these into the API before building the adapter. Faking them here
+    would put business rules in the wrong place.
+
+STEP 2 - SCAFFOLD, AND PROBE YOUR LIBRARIES BEFORE WRITING AGAINST THEM
+
+        python -m venv .venv
+        .venv/bin/pip install fastmcp httpx pydantic pytest pytest-asyncio respx
+
+    Then, before any real code, confirm every framework function you plan to
+    call actually exists with the signature you expect. This costs five
+    minutes and saved five tasks of rework here.
+
+    Do NOT put a Dockerfile at the repository root unless you mean it -
+    Railway silently changes its build system when it finds one.
+
+STEP 3 - ONE MODULE THAT SPEAKS HTTP, AND ONLY ONE
+
+    Every request to the API goes through a single client class. It unwraps
+    the response envelope, maps errors to an exception CARRYING THE STATUS
+    CODE (409 means "retry smaller", 404 means "give up" - collapsing them
+    loses the only useful signal), and never sends cookies.
+
+    If the API changes shape later, exactly one file breaks.
+
+STEP 4 - MODEL THE RESPONSES STRICTLY
+
+    Type money as a string and REJECT numbers rather than converting them
+    silently. Silent conversion is how a two-type price bug survived
+    unnoticed in the shop for two milestones.
+
+    Ignore unknown fields, though - an API that grows a field should not take
+    every tool down.
+
+STEP 5 - BUILD THE READ TOOLS FIRST
+
+    Low-risk, read-only, no approvals. Group them by domain in separate files
+    (products / orders / cart) - later, each file becomes one specialist
+    agent's toolbox.
+
+    Never accept a user id as an argument. Identity comes from the token.
+
+STEP 6 - THEN THE WRITES, WITH IDEMPOTENCY KEYS
+
+    Derive the key from the arguments PLUS a conversation id. Arguments alone
+    means "add one more" tomorrow looks identical to "add one more" today, and
+    the second silently replays the first - the customer asks for another item
+    and gets nothing, with a success message.
+
+STEP 7 - THEN THE DANGEROUS ONE, BEHIND A REAL APPROVAL
+
+    The design that matters:
+
+      * Sign an approval over (session, tool name, HASH OF THE ARGUMENTS,
+        nonce, expiry).
+      * Validate it against the arguments of the call ACTUALLY ARRIVING.
+      * Make it single-use, and burn the nonce LAST so a failed check does
+        not consume a legitimate approval.
+      * Mint it from a route that is NOT an AI tool. An AI that can approve
+        itself makes the whole thing theatre.
+
+    The argument hash is the entire point. Without it, approval to cancel one
+    order is approval to cancel any order, and an AI that has been fed
+    malicious instructions can simply redirect it.
+
+STEP 8 - SERVE OVER HTTP, NOT STDIO
+
+    Stdio carries one identity per process. In a multi-customer application
+    every user would share whichever token the process started with.
+
+STEP 9 - DEPLOY, AND VERIFY SOMETHING ONLY THE NEW VERSION COULD SAY
+
+    Set the signing secret, and make the server refuse to start without it.
+
+    Then run a script that exercises EVERY tool, not a manual spot check. Make
+    the readiness check version-aware - otherwise you will measure the
+    container you are replacing, which happened twice in this project.
+
+STEP 10 - RECORD A BASELINE
+
+    Per-tool speed and success rate, measured with VARIED inputs. Repeating
+    one search term measures the cache, not the system.
+
+    That baseline is what the next phase must not make worse.
+
+    IN PLAIN TERMS
+    A recipe for someone starting fresh. The order matters: check what the
+    shop really does, fix what it is missing, build the safe read-only
+    actions, then the ones that change things, then the dangerous one behind
+    a proper approval - and only then connect an AI. The single most
+    important detail is that an approval must be stamped with WHAT it
+    approves, not merely exist.
+
+
+================================================================================
+8. WHAT WE WOULD DO DIFFERENTLY
+================================================================================
+
+    * PROBE THE FRAMEWORK'S DEFAULTS, NOT JUST ITS FUNCTIONS. The verification
+      step confirmed that the header accessor existed. It did not check what
+      that accessor removes by default, which was the actual bug.
+
+    * WRITE THE END-TO-END SWEEP EARLIER. It was the last task and it found
+      two bugs immediately. As the first task it would have found them sooner
+      and cost nothing extra.
+
+    * MAKE EVERY READINESS CHECK ASSERT SOMETHING NEW. Twice, a deploy was
+      verified against the container being replaced.
+
+    * DO NOT ASSUME A MILESTONE IS ADDITIVE. A quarter of this work landed in
+      the storefront. That was discovered by reading the code during planning;
+      discovered any later, it would have meant either faking the missing
+      pieces here or stopping mid-build.
+
+    IN PLAIN TERMS
+    Four lessons. The theme: check the assumptions you did not know you were
+    making. Every function used was verified to exist - but not what those
+    functions do by default, and that is where the worst bug hid.
+
+
+================================================================================
+9. WHAT COMES NEXT
+================================================================================
+
+    PHASE   DELIVERS                                          STATUS
+    ------  ------------------------------------------------  -----------
+    1       This MCP server. No agent.                        SHIPPED
+    2       One agent, the full toolbox, a chat UI            Not started
+    3       A supervisor plus domain specialists              Not started
+
+Phase 2 already owes three things, all decided during Phase 1:
+
+    * A TOKEN REFRESH MECHANISM. Tokens are deliberately short-lived because
+      they cannot be revoked, but a conversation outlives fifteen minutes and
+      this server never sees a password.
+
+    * APPROVAL PROMPTS BUILT FROM STRUCTURED ARGUMENTS, NEVER FROM AI PROSE.
+      The gate is only as trustworthy as the text beside the button. If the AI
+      writes that text, an injected product review can write it too.
+
+    * A DESIGN PASS ON PROMPT INJECTION. Product descriptions and reviews are
+      written by strangers and flow into AI context through the harmless-
+      looking tools. Approval tokens close the ACTION path. They do nothing
+      about information leaking out through an innocent search.
+
+    IN PLAIN TERMS
+    The controls exist and work. Next comes the AI that uses them. Three
+    safety items are already booked in - the most important being that
+    product reviews are written by the public and read by the AI, and nobody
+    has closed that door yet.
+
+================================================================================
