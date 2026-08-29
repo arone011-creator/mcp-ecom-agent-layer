@@ -6,6 +6,11 @@ and — from Phase 2 onward — the agents themselves.
 
 **Status: Phase 1 (MCP server) complete. No agent exists yet.**
 
+**[→ Technical Snapshot](docs/TECHNICAL_SNAPSHOT.md)** — the whole service
+in one document: architecture, the nine tools, the security model,
+deployment and known limits. Every section has a plain-language summary,
+so it reads for technical and non-technical audiences alike.
+
 ## What this is
 
 ```
