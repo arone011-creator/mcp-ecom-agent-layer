@@ -13,6 +13,9 @@ deployment and known limits.
 **[→ Iterations](docs/ITERATIONS.txt)** — how it was built: what worked,
 what failed, and how to replicate this service from scratch.
 
+**[→ M4 Plan](docs/PLAN_M4_AGENT.txt)** — what comes next: the agent that
+uses these nine tools, and how it is kept from approving itself.
+
 Both carry a plain-language summary in every section, so they read for
 technical and non-technical audiences alike.
 

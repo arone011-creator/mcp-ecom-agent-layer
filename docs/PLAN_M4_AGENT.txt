@@ -1,0 +1,359 @@
+================================================================================
+IMPLEMENTATION PLAN - M4 / PHASE 2, AGENT SHARE
+The agent itself: one agent, the full toolbox. Written 29 Aug 2026.
+================================================================================
+
+M4 is split across two repositories, because the work genuinely is.
+
+    THIS PLAN          the agent: the loop, tool wiring, event emission,
+                       approval handling, the eval harness, the deploy
+    THE OTHER PLAN     mcp-ecom/docs/PLAN_M4_STOREFRONT.txt - the chat UI,
+                       the event stream to the browser, token refresh, and
+                       the approval control a human actually clicks
+
+Neither is complete alone. Read both before starting either.
+
+    IN PLAIN TERMS
+    The next stage adds the AI that uses the nine tools built in Phase 1.
+    This document covers the AI itself. The chat window it talks through
+    lives in the shop's project.
+
+
+WHAT THIS PLAN IS, AND IS NOT
+-----------------------------
+It is a TASK-LEVEL plan: what to build, in what order, what each task must
+prove, and which decisions come first.
+
+It is NOT a step-by-step script with the code pre-written, and that is
+deliberate. Phase 1's own plan called four framework functions before the
+library was installed; a probe step found one of them wrong, five tasks
+before it would have failed against a live deployment. Writing agent-loop
+code now, against a framework not yet chosen, would repeat that mistake at
+a larger scale.
+
+Write each task's step-level plan against the real library, at the time.
+
+    IN PLAIN TERMS
+    This lists what to build and in what order, not the finished code.
+    Last time, checking a library's real behaviour before writing against
+    it caught a mistake early. The same reasoning applies here.
+
+
+CONTENTS
+--------
+     1. Decisions that must be made first
+     2. Architecture - where the agent sits
+     3. The model, and the settings that matter
+     4. Task list
+     5. The eval harness
+     6. Exit criteria
+     7. Risks carried in
+
+
+================================================================================
+1. DECISIONS THAT MUST BE MADE FIRST
+================================================================================
+
+(A) WHICH HARNESS RUNS THE LOOP?
+
+    Phase 3 intends LangGraph, for its interrupt-and-resume model. Phase 2
+    needs one agent. Three options:
+
+      1. LANGGRAPH NOW. No rework at Phase 3, and the pause-for-approval
+         mechanism is the same one Phase 3 needs. Costs a steeper learning
+         curve in a phase that does not need a graph.
+
+      2. THE ANTHROPIC SDK'S TOOL RUNNER. Least code: it drives the
+         request -> execute -> loop cycle, with per-turn hooks that suit an
+         approval gate. But it expects tools declared in code, and ours
+         arrive dynamically from an MCP server - verify that fit before
+         committing.
+
+      3. A MANUAL LOOP over the Messages API. Most code, fewest surprises,
+         and the tool list can be built at runtime from whatever MCP
+         advertises.
+
+    RECOMMENDED: 1, LangGraph now. The approval gate IS an interrupt, and
+    building it twice is the expensive path. But VERIFY THE FIT FIRST -
+    a probe task, exactly as Phase 1 did, before any code depends on it.
+
+(B) HOW DOES THE AGENT LEARN THE TOOLS?
+
+    The MCP server advertises nine tools with schemas. Those must become
+    Claude tool definitions. Read them at startup, or on every session?
+
+    RECOMMENDED: at startup, with the count asserted. A tool surface that
+    silently shrinks is how a capability disappears without anyone noticing
+    - there is already a test in this repo for exactly that.
+
+(C) CONFIRM THE APPROVAL BOUNDARY, IN WRITING.
+
+    The agent MUST NOT be able to mint its own approval token. The mint is
+    an HTTP route, deliberately not an MCP tool - but that only helps if the
+    agent process cannot simply call it.
+
+    THE RULE: the storefront's route handler mints, after a human clicks,
+    and passes the token in as the argument of the next tool call. This
+    process never calls /approvals.
+
+    Write the test that asserts it. An agent that can approve itself makes
+    every other control in this system decorative.
+
+    IN PLAIN TERMS
+    Three decisions. The critical one: the AI must never be able to give
+    itself permission for a dangerous action. A person clicks, the shop
+    issues the permission, and the AI only ever receives it.
+
+
+================================================================================
+2. ARCHITECTURE - WHERE THE AGENT SITS
+================================================================================
+
+    Browser
+       |
+       |  the customer types
+       v
+    Storefront route  ---- mints a 15-minute token ----+
+       |                                                |
+       |  utterance + token                             |
+       v                                                |
+    AGENT SERVICE  (this repository)                    |
+       |                                                |
+       |  MCP calls, carrying that token                |
+       v                                                |
+    MCP server  ->  /api/v1  ->  database  <------------+
+
+    Approval, when a high-risk tool is requested:
+
+    agent emits approval_required  ->  UI shows a card  ->  human clicks
+       ->  STOREFRONT mints the approval  ->  handed back to the agent
+       ->  agent calls cancel_order with it
+
+Note what the agent never does in that sequence: mint. It asks, waits, and
+receives.
+
+    IN PLAIN TERMS
+    The customer types into the shop's website, which passes the message
+    to the AI along with a short-lived pass. The AI uses its nine tools.
+    When it wants to do something irreversible it must stop and ask, and
+    the permission comes from the shop after a person clicks - never from
+    the AI itself.
+
+
+================================================================================
+3. THE MODEL, AND THE SETTINGS THAT MATTER
+================================================================================
+
+    Model            claude-opus-5
+    Thinking         adaptive - {"type": "adaptive"}. It is on by default
+                     on this model; do not disable it. If cost needs
+                     trimming, lower effort instead.
+    Effort           output_config: {"effort": "high"} to begin. Measure
+                     before changing it; "high" is often the sweet spot.
+    Streaming        Required for anything with a long output, and the chat
+                     UI wants tokens as they arrive.
+    max_tokens       Generous. A truncated turn costs a retry.
+
+FIVE API FACTS WORTH PINNING DOWN NOW, because a stale assumption here is
+expensive later:
+
+  * budget_tokens IS REJECTED on this model. The fixed thinking-budget idea
+    is gone; adaptive thinking plus effort replaces it.
+  * ASSISTANT PREFILL IS REJECTED. Shape output with structured outputs or
+    the system prompt, not by pre-writing the reply.
+  * PARSE TOOL INPUTS AS JSON. Never string-match the serialised input;
+    escaping varies.
+  * RETURN ALL tool_result BLOCKS IN ONE user MESSAGE. Splitting them
+    across messages silently teaches the model to stop calling tools in
+    parallel.
+  * ALWAYS CHECK stop_reason BEFORE READING CONTENT. A safety refusal
+    arrives as a normal 200 response.
+
+Verify these against the SDK at implementation time rather than trusting
+this list - that is the habit that has paid off twice already.
+
+    IN PLAIN TERMS
+    Which AI model to use and how to configure it. Several settings that
+    older guides recommend are now rejected outright, so this section
+    pins down the current ones rather than leaving them to memory.
+
+
+================================================================================
+4. TASK LIST
+================================================================================
+
+Each task ends in a commit and stops for review. Every behaviour that
+matters gets a test that has been seen to fail - the approval tests in
+Phase 1 were verified that way and it is why they can be trusted.
+
+TASK 0 - PROBE THE HARNESS BEFORE BUILDING ON IT
+    Install the chosen framework and the Anthropic SDK. Confirm, by running
+    code: how tools are declared, how a pause-for-approval is expressed and
+    resumed, and whether tool definitions can be built at runtime from MCP's
+    advertised schemas.
+    MUST PROVE: every framework call this plan assumes actually exists.
+    Phase 1's equivalent probe caught a wrong API five tasks early.
+
+TASK 1 - MCP CLIENT AND TOOL TRANSLATION
+    Connect to the MCP server, list its tools, translate the schemas into
+    Claude tool definitions.
+    MUST PROVE: exactly nine tools translate; an unknown tool is refused
+    rather than passed through; the bearer token travels on every call.
+
+TASK 2 - THE LOOP, READ-ONLY TOOLS ONLY
+    A single turn: utterance in, tool calls out, answer back. Wire only the
+    six low-risk tools.
+    MUST PROVE: workflow 1, "what did I order recently", end to end against
+    the live MCP server; and that no user id is ever sent as an argument.
+
+TASK 3 - MEDIUM-RISK TOOLS
+    Add add_to_cart and remove_from_cart. These execute, then surface as an
+    informational event - not a blocking prompt.
+    MUST PROVE: an over-stock 409 is handled by retrying with the available
+    number rather than repeating the same request. The API returns that
+    number for exactly this purpose.
+
+TASK 4 - EVENT EMISSION
+    Emit the five events the storefront plan defines. Same schema, same
+    version - agree it in one place and import it, do not describe it twice.
+    MUST PROVE: an event stream can be replayed into the UI and produces
+    the same conversation.
+
+TASK 5 - THE APPROVAL PAUSE
+    On a high-risk tool: emit approval_required with STRUCTURED arguments,
+    stop, and resume when a token arrives.
+    MUST PROVE, and this is the milestone's most important test:
+      * the agent never calls /approvals;
+      * a resumed call uses the arguments the human saw, not arguments the
+        model produced afterwards;
+      * refusing sends nothing to the MCP server;
+      * a token that never arrives times out cleanly rather than leaving a
+        thread paused forever. LangGraph has no built-in timeout, and the
+        design document already flags this.
+
+TASK 6 - PROMPT INJECTION, FIRST PASS
+    Product descriptions and review text reach the model. At minimum: mark
+    tool output as data rather than instruction in the system prompt, and
+    add an eval case whose fixture contains an injected instruction.
+    MUST PROVE: an injected "cancel order X" inside review text does not
+    produce a cancel_order call.
+    This is a mitigation, not the design pass that is still owed.
+
+TASK 7 - THE EVAL HARNESS
+    See section 5. It is a required task, not a nice-to-have.
+
+TASK 8 - DEPLOY AND MEASURE
+    A third Railway service, or an extension of this one - decide based on
+    whether the agent's memory profile fits alongside the MCP server.
+    MUST PROVE: the readiness check asserts something ONLY the new
+    deployment can satisfy. Twice on this project a deploy was verified
+    against the container being replaced.
+
+    IN PLAIN TERMS
+    Nine steps, each ending in a review. The order matters: check the
+    tools work before adding the AI, use the harmless actions before the
+    ones that change something, and add the stop-and-ask step before
+    anything irreversible is reachable.
+
+
+================================================================================
+5. THE EVAL HARNESS
+================================================================================
+
+Required, and it also closes a risk carried since the original design: there
+has never been a way to measure tool selection.
+
+    evals/workflows/*.yaml      one file per workflow: the utterance, the
+                                expected tool sequence, expected approvals
+    evals/run.py                executes each N times against the live
+                                agent and reports
+
+    REPORTED       pass rate, tool-selection accuracy, turn latency,
+                   tokens consumed
+
+    WRITES         metrics/agent-evals.json, in the shape the storefront's
+                   scorecard reads. Same arrangement as Phase 1: the sweep
+                   in this repository writes metrics/mcp-latency.json and
+                   the storefront's harness reads it from disk, so that
+                   harness never needs a Python environment. Agree the file
+                   shape with the storefront's Task 8 before writing either
+                   side.
+
+THE FOUR WORKFLOWS, from docs/mcp/phase-2-single-agent.md in the storefront
+repository:
+
+  1. "What did I order recently?" - one tool call.
+  2. "Cancel my most recent order." - get_orders, get_order, confirm,
+     cancel_order.
+  3. "Find me headphones under $200 with a 4+ rating and add the best one
+     to my cart." - search, check stock, recommend, approve, add.
+  4. Showcase: "Find running shoes under $150 rated above 4.3, show me your
+     best option, and don't add anything to my cart until I approve."
+
+RUN EACH N TIMES, NOT ONCE. A model is not deterministic, and a workflow
+that passes four times in five is a different fact from one that passes.
+
+Workflow pass rate becomes a scorecard gate in the storefront's Task 8.
+
+    IN PLAIN TERMS
+    A test suite for the AI's judgement, not just its plumbing. It runs
+    four realistic customer requests many times over and records how often
+    the AI chooses the right actions. Running each one repeatedly matters,
+    because an AI can get the same question right one time and wrong the
+    next.
+
+
+================================================================================
+6. EXIT CRITERIA
+================================================================================
+
+    * All four workflows pass in the eval harness, at an agreed rate,
+      measured over repeated runs rather than a single demo.
+    * A high-risk action always pauses for a human, and the resumed call
+      uses the arguments the human actually saw.
+    * The agent cannot mint an approval - asserted by a test.
+    * No tool call ever carries a user id supplied by the model.
+    * The MCP tool timings from M3 have not regressed: an agent that makes
+      the same tool slower has a bug, not a feature.
+    * An injected instruction inside review text does not cause a tool call
+      (Task 6's eval case).
+
+    IN PLAIN TERMS
+    Done means: it handles four realistic requests reliably, it always
+    stops and asks before doing anything irreversible, it cannot give
+    itself permission, it cannot be talked into acting on instructions
+    hidden in a product review, and it has not made the underlying tools
+    any slower.
+
+
+================================================================================
+7. RISKS CARRIED IN
+================================================================================
+
+    * PROMPT INJECTION IS UNMITIGATED AS A DESIGN. Task 6 narrows the
+      execution path. It does nothing about information leaking out through
+      an innocent-looking search, and the design pass is still owed.
+
+    * SINGLE-USE APPROVALS HOLD FOR ONE REPLICA ONLY. The spent-nonce set
+      is in process memory. Before this scales, it needs a shared store.
+
+    * SIX OF THE NINE TOOLS ARE STILL UNVERIFIED AGAINST PRODUCTION. They
+      pass against mocks. Four bugs on this project were invisible to
+      mocks. Run the Phase 1 sweep with real credentials before trusting
+      them under an agent.
+
+    * NO TIMEOUT ON A PAUSED CONVERSATION. Flagged in the design document
+      for LangGraph specifically. Task 5 must close it.
+
+    * COST IS NOW A LIVE VARIABLE. Every conversation spends money, and an
+      agent that loops spends more. Measure tokens per workflow from the
+      first eval run, not after the first bill.
+
+    IN PLAIN TERMS
+    Five known problems carried into this stage. Two are worth watching
+    closely: hidden instructions inside product reviews are still not
+    properly solved, and from this point onwards every conversation costs
+    real money - so it is measured from day one rather than discovered
+    later.
+
+================================================================================
