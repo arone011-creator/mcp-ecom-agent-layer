@@ -1,9 +1,9 @@
 """The MCP tool surface, translated into what Claude expects.
 
 Two shapes for the same nine capabilities. MCP advertises `inputSchema`;
-Claude's tool definition wants `input_schema`. The rename is most of the
-work, and the two things that are NOT a rename are the point of this
-module:
+OpenAI's tool definition wants it nested as `function.parameters`. The
+re-nesting is most of the work, and the things that are NOT a re-nesting
+are the point of this module:
 
   - an unknown tool is refused. The MCP server is a separate deployment
     that could grow a tool this agent was never built for, and a
@@ -15,11 +15,11 @@ module:
     cannot invent a value for.
 """
 
-from typing import Any
+from typing import Any, Iterable
 
-from anthropic.types import ToolParam
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp.types import Tool
+from openai.types.chat import ChatCompletionToolParam
 
 import config
 
@@ -47,25 +47,66 @@ INJECTED_ARGUMENTS: dict[str, frozenset[str]] = {
 }
 
 
+# The tools that cannot change anything. Task 2 of the M4 plan wires only
+# these; Medium-risk cart writes and the High-risk cancellation arrive with
+# the approval machinery that guards them.
+READ_ONLY_TOOLS = frozenset(
+    {
+        "search_products",
+        "get_product",
+        "check_inventory",
+        "get_orders",
+        "get_order",
+        "get_cart",
+    }
+)
+
+# Identity is never an argument. It is resolved from the bearer token by
+# the API's own whoami, and a model supplying one of these is the model
+# asserting who the caller is. None of the nine schemas contain these --
+# the guard exists because a model can invent a key that was never offered.
+FORBIDDEN_ARGUMENTS = frozenset(
+    {"user_id", "userId", "customer_id", "customerId", "email", "user", "customer"}
+)
+
+
 class UnknownToolError(Exception):
     """The MCP server's tool surface is not the one this agent expects."""
 
 
-def to_claude_tool(tool: Tool) -> ToolParam:
-    """One MCP tool as a Claude tool definition."""
+class ForbiddenArgumentError(Exception):
+    """A tool call carried an argument the model has no business supplying."""
+
+
+def to_openai_tool(tool: Tool) -> ChatCompletionToolParam:
+    """One MCP tool as an OpenAI tool definition.
+
+    Verified against a live call: the MCP schema is accepted as
+    `parameters` unchanged. This re-nests; it does not rewrite.
+    """
     schema = _without_injected_arguments(tool.name, tool.inputSchema)
 
     return {
-        "name": tool.name,
-        # Claude tolerates a missing description; an explicit empty string
-        # is clearer than None travelling through the request builder.
-        "description": tool.description or "",
-        "input_schema": schema,
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            # An explicit empty string is clearer than None travelling
+            # through the request builder.
+            "description": tool.description or "",
+            "parameters": schema,
+        },
     }
 
 
-def translate_tools(tools: list[Tool]) -> list[ToolParam]:
-    """Every advertised tool, or an error naming what did not match."""
+def translate_tools(
+    tools: list[Tool], only: Iterable[str] | None = None
+) -> list[ChatCompletionToolParam]:
+    """Every advertised tool, or an error naming what did not match.
+
+    `only` narrows the surface handed to the model without weakening the
+    check: the full nine must still be advertised, so a tool going missing
+    is still caught even when this turn does not use it.
+    """
     advertised = {tool.name for tool in tools}
 
     unknown = advertised - KNOWN_TOOLS
@@ -80,7 +121,23 @@ def translate_tools(tools: list[Tool]) -> list[ToolParam]:
             f"MCP server is not advertising expected tools: {sorted(missing)}"
         )
 
-    return [to_claude_tool(tool) for tool in tools]
+    wanted = set(only) if only is not None else KNOWN_TOOLS
+
+    return [to_openai_tool(tool) for tool in tools if tool.name in wanted]
+
+
+def reject_forbidden_arguments(name: str, arguments: dict[str, Any]) -> None:
+    """Raise if a tool call carries an identity argument.
+
+    Called before every execution, not just the risky ones -- a read tool
+    scoped to the wrong customer is the leak, not the write.
+    """
+    offending = sorted(set(arguments) & FORBIDDEN_ARGUMENTS)
+    if offending:
+        raise ForbiddenArgumentError(
+            f"{name} was called with identity arguments the model may not supply: "
+            f"{offending}"
+        )
 
 
 def build_transport(url: str, token: str) -> StreamableHttpTransport:
@@ -115,11 +172,13 @@ def _without_injected_arguments(name: str, schema: dict[str, Any]) -> dict[str, 
     return copy
 
 
-async def list_claude_tools(token: str, url: str | None = None) -> list[ToolParam]:
+async def list_openai_tools(
+    token: str, url: str | None = None, only: Iterable[str] | None = None
+) -> list[ChatCompletionToolParam]:
     """Connect, list, translate. The agent's whole view of what it can do."""
     from fastmcp import Client
 
     transport = build_transport(url or config.MCP_SERVER_URL, token)
 
     async with Client(transport) as client:
-        return translate_tools(await client.list_tools())
+        return translate_tools(await client.list_tools(), only=only)

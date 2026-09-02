@@ -9,10 +9,14 @@ import pytest
 from mcp.types import Tool
 
 from agent.tools import (
+    FORBIDDEN_ARGUMENTS,
     KNOWN_TOOLS,
+    READ_ONLY_TOOLS,
+    ForbiddenArgumentError,
     UnknownToolError,
     build_transport,
-    to_claude_tool,
+    reject_forbidden_arguments,
+    to_openai_tool,
     translate_tools,
 )
 
@@ -35,34 +39,40 @@ def test_the_nine_known_tools_are_the_nine_the_server_advertises():
     assert len(KNOWN_TOOLS) == 9
 
 
-def test_translation_renames_the_schema_key_to_claude_spelling():
+def test_translation_nests_the_schema_the_way_openai_wants_it():
+    # Verified against a live gpt-4.1 call: the MCP schema is accepted as
+    # `parameters` unchanged, anyOf/default and all. This is a re-nesting,
+    # not a schema rewrite.
     schema = {
         "properties": {"product_id": {"type": "string"}},
         "required": ["product_id"],
         "type": "object",
     }
 
-    translated = to_claude_tool(mcp_tool("get_product", schema))
+    translated = to_openai_tool(mcp_tool("get_product", schema))
 
     assert translated == {
-        "name": "get_product",
-        "description": "d",
-        "input_schema": schema,
+        "type": "function",
+        "function": {
+            "name": "get_product",
+            "description": "d",
+            "parameters": schema,
+        },
     }
-    assert "inputSchema" not in translated
+    assert "inputSchema" not in translated["function"]
 
 
 def test_a_missing_description_becomes_empty_rather_than_none():
-    translated = to_claude_tool(mcp_tool("get_cart", description=None))
+    translated = to_openai_tool(mcp_tool("get_cart", description=None))
 
-    assert translated["description"] == ""
+    assert translated["function"]["description"] == ""
 
 
 def test_all_nine_translate():
     translated = translate_tools(all_nine())
 
     assert len(translated) == 9
-    assert {t["name"] for t in translated} == KNOWN_TOOLS
+    assert {t["function"]["name"] for t in translated} == KNOWN_TOOLS
 
 
 def test_an_unknown_tool_is_refused_rather_than_passed_through():
@@ -98,11 +108,12 @@ def test_cancel_order_does_not_advertise_approval_token_to_the_model():
         "type": "object",
     }
 
-    translated = to_claude_tool(mcp_tool("cancel_order", schema))
+    translated = to_openai_tool(mcp_tool("cancel_order", schema))
 
-    assert "approval_token" not in translated["input_schema"]["properties"]
-    assert "order_id" in translated["input_schema"]["properties"]
-    assert translated["input_schema"]["required"] == ["order_id"]
+    params = translated["function"]["parameters"]
+    assert "approval_token" not in params["properties"]
+    assert "order_id" in params["properties"]
+    assert params["required"] == ["order_id"]
 
 
 def test_stripping_does_not_mutate_the_caller_s_schema():
@@ -111,7 +122,7 @@ def test_stripping_does_not_mutate_the_caller_s_schema():
         "type": "object",
     }
 
-    to_claude_tool(mcp_tool("cancel_order", schema))
+    to_openai_tool(mcp_tool("cancel_order", schema))
 
     assert "approval_token" in schema["properties"]
 
@@ -123,9 +134,12 @@ def test_other_tools_keep_every_property():
         "type": "object",
     }
 
-    translated = to_claude_tool(mcp_tool("add_to_cart", schema))
+    translated = to_openai_tool(mcp_tool("add_to_cart", schema))
 
-    assert set(translated["input_schema"]["properties"]) == {"product_id", "quantity"}
+    assert set(translated["function"]["parameters"]["properties"]) == {
+        "product_id",
+        "quantity",
+    }
 
 
 def test_the_bearer_token_travels_on_every_call():
@@ -139,3 +153,46 @@ def test_a_blank_token_is_refused_rather_than_sent_empty():
     # and authenticates nobody.
     with pytest.raises(ValueError):
         build_transport("https://mcp.test/mcp", "")
+
+
+def test_the_read_only_surface_is_the_six_low_risk_tools():
+    # Task 2 wires only the tools that cannot change anything. add_to_cart
+    # and remove_from_cart are Medium; cancel_order is High and needs an
+    # approval this task does not build.
+    assert READ_ONLY_TOOLS == {
+        "search_products",
+        "get_product",
+        "check_inventory",
+        "get_orders",
+        "get_order",
+        "get_cart",
+    }
+    assert READ_ONLY_TOOLS < KNOWN_TOOLS
+
+
+def test_translate_can_narrow_to_the_read_only_surface():
+    translated = translate_tools(all_nine(), only=READ_ONLY_TOOLS)
+
+    assert {t["function"]["name"] for t in translated} == READ_ONLY_TOOLS
+
+
+def test_a_user_id_argument_is_refused():
+    # Identity comes from the bearer token, resolved by the API's own
+    # whoami. A user id in the arguments is the model asserting who the
+    # caller is, which is the one thing it must never do -- and a model
+    # can hallucinate a key that was never in the schema.
+    for key in FORBIDDEN_ARGUMENTS:
+        with pytest.raises(ForbiddenArgumentError):
+            reject_forbidden_arguments("get_orders", {key: "u1"})
+
+
+def test_ordinary_arguments_pass_the_guard():
+    reject_forbidden_arguments("get_order", {"order_id": "o1"})
+    reject_forbidden_arguments("search_products", {"query": "shoes", "limit": 5})
+
+
+def test_the_guard_names_the_offending_key():
+    with pytest.raises(ForbiddenArgumentError) as caught:
+        reject_forbidden_arguments("get_orders", {"user_id": "u1", "limit": 5})
+
+    assert "user_id" in str(caught.value)

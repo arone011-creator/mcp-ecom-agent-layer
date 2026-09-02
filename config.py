@@ -15,6 +15,10 @@ MCP_SERVER_URL = os.environ.get(
     "MCP_SERVER_URL", "https://mcp-production-e344.up.railway.app/mcp"
 )
 
+# The model behind the agent. OPENAI_API_KEY is read by the SDK itself and
+# deliberately not mirrored here -- one fewer place a key can be logged.
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1")
+
 # Signs approval tokens. Deliberately unrelated to NEXTAUTH_SECRET: this key
 # authorises one tool call, it does not authenticate a person, and the two
 # should be rotatable independently.
