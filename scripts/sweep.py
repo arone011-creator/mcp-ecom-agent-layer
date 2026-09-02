@@ -176,6 +176,8 @@ async def run(args) -> int:
             cancellable = [o for o in orders if o["status"] in ("PENDING", "PROCESSING")]
             if cancellable:
                 order_id = cancellable[0]["id"]
+                for _ in range(SAMPLES):
+                    await timed(client, results, "get_order", {"order_id": order_id})
             else:
                 print("    no cancellable order; place one to sweep cancel_order fully")
         else:
@@ -202,16 +204,26 @@ async def run(args) -> int:
             print(f"    cancel_order with a forged token: refused ({str(error).splitlines()[0][-60:]})")
 
         if authenticated and order_id:
-            session = transport.__dict__.get("_session_id") or "sweep"
+            session = transport.get_session_id() or "sweep"
             try:
                 approval = await mint_approval(args.url, token, session, order_id)
-                await timed(
+                # timed() catches a failed call itself (it prints "cancel_order
+                # failed: ..." and returns None) so this try/except only ever
+                # sees a failure to mint the approval, not a failure to spend
+                # it. Branching on the return value is what catches that case.
+                result = await timed(
                     client,
                     results,
                     "cancel_order",
                     {"order_id": order_id, "approval_token": approval},
                 )
-                print(f"    cancel_order with a valid approval: order {order_id} cancelled")
+                if result is None:
+                    failures.append(
+                        f"approved cancel_order failed for order {order_id} "
+                        "(see 'cancel_order failed' above)"
+                    )
+                else:
+                    print(f"    cancel_order with a valid approval: order {order_id} cancelled")
             except Exception as error:  # noqa: BLE001
                 failures.append(f"approved cancel_order failed: {error}")
         else:
