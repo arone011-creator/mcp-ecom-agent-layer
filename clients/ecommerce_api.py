@@ -61,15 +61,10 @@ class EcommerceApi:
         try:
             body = response.json()
         except ValueError:
-            # TEMPORARY DIAGNOSTIC -- reverted once the private-network 301
-            # is understood. The body may normally be an HTML error page
-            # from a proxy, which is why this isn't reported verbatim
-            # ordinarily.
+            # The body may be an HTML error page from a proxy. Reporting it
+            # verbatim would put arbitrary upstream text into agent context.
             raise ApiError(
-                response.status_code,
-                "DIAG location=" + repr(response.headers.get("location"))
-                + " headers=" + repr(dict(response.headers))
-                + " body=" + repr(response.text[:300]),
+                response.status_code, "Upstream returned an unreadable response"
             )
 
         if response.status_code >= 400:
