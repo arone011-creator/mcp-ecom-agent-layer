@@ -36,7 +36,7 @@
 - Create: `untrusted_content.py`
 - Test: `tests/test_untrusted_content.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_untrusted_content.py`:
 
@@ -101,12 +101,12 @@ def test_text_under_the_cap_is_not_truncated():
     assert result == f"<untrusted-user-content>{text}</untrusted-user-content>"
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_untrusted_content.py -v`
 Expected: `ModuleNotFoundError: No module named 'untrusted_content'` (or import collection error) — the module does not exist yet.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `untrusted_content.py` at the repo root:
 
@@ -168,12 +168,12 @@ def mark_untrusted(text: str | None) -> str | None:
     return f"<untrusted-user-content>{cleaned}</untrusted-user-content>"
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_untrusted_content.py -v`
 Expected: 7 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add untrusted_content.py tests/test_untrusted_content.py
@@ -196,7 +196,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 - Modify: `tests/test_schemas.py`
 - Modify: `tests/test_tools_products.py`
 
-- [ ] **Step 1: Fix the now-stale assertion first, and watch it fail**
+- [x] **Step 1: Fix the now-stale assertion first, and watch it fail**
 
 `tests/test_tools_products.py` currently asserts a raw, unwrapped description. Change it to expect the wrapped form — this step intentionally makes the test fail against the current, not-yet-wired schema, proving the test actually exercises the new behavior.
 
@@ -219,7 +219,7 @@ Replace with:
 Run: `.venv/Scripts/python -m pytest tests/test_tools_products.py::test_get_product_returns_the_detail_shape -v`
 Expected: FAIL — `assert 'Fast' == '<untrusted-user-content>Fast</untrusted-user-content>'`
 
-- [ ] **Step 2: Add the schema-level tests, and watch them fail too**
+- [x] **Step 2: Add the schema-level tests, and watch them fail too**
 
 In `tests/test_schemas.py`, add (after `test_product_reads_the_api_camel_case_names`):
 
@@ -257,7 +257,7 @@ def test_a_bidi_override_in_a_description_does_not_survive_parsing():
 Run: `.venv/Scripts/python -m pytest tests/test_schemas.py -v -k description`
 Expected: `test_product_description_is_marked_as_untrusted_content` FAILS (description comes back unwrapped); `test_a_missing_description_is_not_wrapped` and the bidi test PASS already (nothing to strip, or `None` already stays `None`) — that's fine, they're here to lock the behavior in going forward, not to prove a regression right now.
 
-- [ ] **Step 3: Wire the validator**
+- [x] **Step 3: Wire the validator**
 
 In `models/schemas.py`, change the import line:
 
@@ -324,17 +324,17 @@ class ProductSummary(Base):
         return mark_untrusted(value)
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_schemas.py tests/test_tools_products.py -v`
 Expected: all pass, including the two steps above that were failing a moment ago.
 
-- [ ] **Step 5: Run the full suite to confirm nothing else broke**
+- [x] **Step 5: Run the full suite to confirm nothing else broke**
 
 Run: `.venv/Scripts/python -m pytest -q`
 Expected: all tests pass (108 existing + 7 new + 3 schema tests = 118 total; exact count may drift slightly if the suite has changed, but the run must be all-green with 0 failures).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add models/schemas.py tests/test_schemas.py tests/test_tools_products.py
@@ -356,7 +356,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `docs/PLAN_M4_AGENT.txt`
 
-- [ ] **Step 1: Rewrite Task 6**
+- [x] **Step 1: Rewrite Task 6**
 
 Find:
 ```
@@ -396,7 +396,7 @@ TASK 6 - PROMPT INJECTION, SECOND PASS
     owned by the other plan.
 ```
 
-- [ ] **Step 2: Update the exit criterion**
+- [x] **Step 2: Update the exit criterion**
 
 Find:
 ```
@@ -411,7 +411,7 @@ Replace with:
       in the agent's own reply (Task 6's two eval cases).
 ```
 
-- [ ] **Step 3: Update the risks-carried-in bullet**
+- [x] **Step 3: Update the risks-carried-in bullet**
 
 Find:
 ```
@@ -430,7 +430,7 @@ Replace with:
       stays open until it is.
 ```
 
-- [ ] **Step 4: Update the plain-terms paragraph in §7**
+- [x] **Step 4: Update the plain-terms paragraph in §7**
 
 Find:
 ```
@@ -452,12 +452,12 @@ Replace with:
     day one rather than discovered later.
 ```
 
-- [ ] **Step 5: Verify no stale references remain**
+- [x] **Step 5: Verify no stale references remain**
 
 Run: `grep -n "FIRST PASS\|design pass that is still owed\|IS UNMITIGATED AS A DESIGN" docs/PLAN_M4_AGENT.txt`
 Expected: no output.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add docs/PLAN_M4_AGENT.txt
@@ -477,12 +477,19 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 
 **Files:** none modified.
 
-- [ ] **Step 1: Run everything**
+- [x] **Step 1: Run everything**
 
 Run: `.venv/Scripts/python -m pytest -q`
 Expected: all pass, 0 failures.
 
-- [ ] **Step 2: If anything failed, stop here**
+One run hit a single failure: `test_approvals.py::test_the_token_does_not_leak_what_it_authorises`,
+asserting a 2-character order id (`"o1"`) never appears as a substring of
+a token whose nonce is random on every run — a pre-existing flake
+unrelated to this plan (`approvals.py` was never touched here), confirmed
+by five immediate clean reruns and a clean full-suite rerun afterward.
+Flagged separately rather than fixed inline (`spawn_task` id `task_8b889c3c`).
+
+- [x] **Step 2: If anything failed, stop here**
 
 Do not proceed to Task 5 (the other repo) with a red suite in this one.
 
@@ -495,7 +502,7 @@ Do not proceed to Task 5 (the other repo) with a red suite in this one.
 
 All commands in this task run with `mcp-ecom-web-app` as the working directory (a sibling of this repo — `../mcp-ecom-web-app` if starting from `mcp-ecom-agent-layer`).
 
-- [ ] **Step 1: Add the rendering-safety requirement to Task 4**
+- [x] **Step 1: Add the rendering-safety requirement to Task 4**
 
 Find:
 ```
@@ -522,7 +529,7 @@ TASK 4 - THE CHAT PAGE, READ-ONLY FIRST
     rendering bypass from turning that into a clickable phishing link.
 ```
 
-- [ ] **Step 2: Strengthen Task 5's approval-card requirement**
+- [x] **Step 2: Strengthen Task 5's approval-card requirement**
 
 Find:
 ```
@@ -556,7 +563,7 @@ TASK 5 - THE APPROVAL CONTROL
       * declining sends nothing to the MCP server.
 ```
 
-- [ ] **Step 3: Update the risks-carried-in bullet**
+- [x] **Step 3: Update the risks-carried-in bullet**
 
 Find:
 ```
@@ -576,7 +583,7 @@ Replace with:
       backing the approval card) but neither is built yet.
 ```
 
-- [ ] **Step 4: Update the plain-terms paragraph in §6**
+- [x] **Step 4: Update the plain-terms paragraph in §6**
 
 Find:
 ```
@@ -597,12 +604,12 @@ Replace with:
     the event) are still to build.
 ```
 
-- [ ] **Step 5: Verify no stale references remain**
+- [x] **Step 5: Verify no stale references remain**
 
 Run: `grep -n "IS STILL UNMITIGATED\|nobody has closed that door" docs/PLAN_M4_STOREFRONT.txt`
 Expected: no output.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add docs/PLAN_M4_STOREFRONT.txt
@@ -623,7 +630,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 
 **Files:** none modified.
 
-- [ ] **Step 1: Review what's pending in each repo**
+- [x] **Step 1: Review what's pending in each repo**
 
 In `mcp-ecom-agent-layer`:
 Run: `git log --oneline origin/main..HEAD`
@@ -633,7 +640,7 @@ In `mcp-ecom-web-app`:
 Run: `git log --oneline origin/main..HEAD`
 Expected: the one commit from Task 5 above.
 
-- [ ] **Step 2: Push, after user confirmation**
+- [x] **Step 2: Push, after user confirmation**
 
 ```bash
 git push origin main
