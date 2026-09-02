@@ -20,11 +20,12 @@ import json
 import operator
 from typing import Annotated, Any, Awaitable, Callable, TypedDict
 
+from fastmcp.exceptions import ToolError
 from langgraph.graph import END, START, StateGraph
 
 import config
 from agent.tools import (
-    READ_ONLY_TOOLS,
+    AGENT_TOOLS,
     build_transport,
     list_openai_tools,
     reject_forbidden_arguments,
@@ -38,10 +39,26 @@ class TurnState(TypedDict, total=False):
     messages: Annotated[list[dict], operator.add]
     tools: list[dict]
     answer: str | None
+    # Every (tool, arguments) pair that has already failed this turn.
+    # Accumulated so the loop can refuse an identical retry.
+    failed: Annotated[list[str], operator.add]
 
 
 def _tool_calls_of(message: dict) -> list[dict]:
     return message.get("tool_calls") or []
+
+
+def _signature(name: str, arguments: dict) -> str:
+    """Identifies one exact call, so a repeat of it can be recognised."""
+    return json.dumps({"tool": name, "args": arguments}, sort_keys=True)
+
+
+def _tool_message(call_id: str, payload) -> dict:
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": json.dumps(payload, default=str),
+    }
 
 
 def build_graph(
@@ -61,6 +78,8 @@ def build_graph(
 
     async def execute_tools(state: TurnState) -> dict:
         results = []
+        newly_failed = []
+        already_failed = set(state.get("failed", []))
 
         for call in _tool_calls_of(state["messages"][-1]):
             name = call["function"]["name"]
@@ -68,18 +87,39 @@ def build_graph(
             # Parse; never string-match.
             arguments = json.loads(call["function"]["arguments"] or "{}")
 
+            # Not a recoverable failure: identity is never the model's to
+            # assert, so this refuses the turn rather than inviting a retry.
             reject_forbidden_arguments(name, arguments)
 
-            result = await execute_tool(name, arguments)
-            results.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "content": json.dumps(result, default=str),
-                }
-            )
+            signature = _signature(name, arguments)
 
-        return {"messages": results}
+            if signature in already_failed:
+                results.append(
+                    _tool_message(
+                        call["id"],
+                        {
+                            "error": "This exact call was already tried this turn "
+                            "and failed. Read the earlier error and change the "
+                            "arguments rather than repeating it."
+                        },
+                    )
+                )
+                continue
+
+            try:
+                result = await execute_tool(name, arguments)
+            except ToolError as failure:
+                # Passed through verbatim. The storefront writes these to
+                # be acted on -- a 409 carries the number that IS
+                # available -- and re-wording or parsing them here would
+                # be a second implementation of someone else's rule.
+                newly_failed.append(signature)
+                results.append(_tool_message(call["id"], {"error": str(failure)}))
+                continue
+
+            results.append(_tool_message(call["id"], result))
+
+        return {"messages": results, "failed": newly_failed}
 
     def route(state: TurnState) -> str:
         return "tools" if _tool_calls_of(state["messages"][-1]) else END
@@ -100,6 +140,7 @@ async def run_turn(
     model_call: ModelCall,
     execute_tool: ToolExecutor,
     tools: list[dict] | None = None,
+    max_steps: int = 25,
 ) -> TurnState:
     """One turn, start to finish."""
     app = build_graph(model_call, execute_tool)
@@ -109,7 +150,12 @@ async def run_turn(
             "messages": [{"role": "user", "content": utterance}],
             "tools": tools or [],
             "answer": None,
-        }
+            "failed": [],
+        },
+        # A confused agent stops rather than looping. The repeat guard
+        # already blocks the obvious case; this bounds the rest, and is
+        # the first half of the cost ceiling Decision D calls for.
+        config={"recursion_limit": max_steps},
     )
 
 
@@ -148,7 +194,7 @@ def mcp_tool_executor(token: str, url: str | None = None) -> ToolExecutor:
 
 async def answer(utterance: str, token: str, *, model: str | None = None) -> TurnState:
     """The whole thing wired to the real model and the real MCP server."""
-    tools = await list_openai_tools(token, only=READ_ONLY_TOOLS)
+    tools = await list_openai_tools(token, only=AGENT_TOOLS)
 
     return await run_turn(
         utterance,

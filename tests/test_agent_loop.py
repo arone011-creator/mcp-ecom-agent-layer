@@ -163,3 +163,151 @@ async def test_no_user_id_is_ever_sent_as_an_argument():
 async def test_the_graph_compiles():
     # It must compile without a checkpointer: this turn never pauses.
     assert build_graph() is not None
+
+
+def failing_executor(error_message, fail_on=None):
+    """An MCP stand-in that raises for a given tool, recording every attempt."""
+    from fastmcp.exceptions import ToolError
+
+    calls = []
+
+    async def execute(name, arguments):
+        calls.append((name, arguments))
+        if fail_on is None or name == fail_on:
+            raise ToolError(error_message)
+        return {"ok": True}
+
+    execute.calls = calls
+    return execute
+
+
+async def test_a_failing_tool_becomes_a_result_the_model_can_read():
+    # Without this the 409 kills the turn and the model never gets the
+    # chance to react that the status code exists to give it.
+    executor = failing_executor(
+        "Error calling tool 'add_to_cart': 409: Only 17 available; cart would hold 67"
+    )
+
+    state = await run_turn(
+        "add 67 headphones",
+        model_call=scripted_model(
+            FakeMessage(
+                tool_calls=[
+                    FakeToolCall("call_1", "add_to_cart", '{"product_id":"p1","quantity":67}')
+                ]
+            ),
+            FakeMessage(content="Only 17 are available - shall I add those?"),
+        ),
+        execute_tool=executor,
+    )
+
+    tool_messages = [m for m in state["messages"] if m.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    # Verbatim: the number the model needs is in the storefront's own
+    # words, and this layer does not parse or reword them.
+    assert "Only 17 available" in tool_messages[0]["content"]
+    assert state["answer"] == "Only 17 are available - shall I add those?"
+
+
+async def test_the_available_number_is_passed_through_not_parsed():
+    executor = failing_executor(
+        "Error calling tool 'add_to_cart': 409: Only 3 available; cart would hold 9"
+    )
+
+    state = await run_turn(
+        "add 9",
+        model_call=scripted_model(
+            FakeMessage(
+                tool_calls=[
+                    FakeToolCall("call_1", "add_to_cart", '{"product_id":"p1","quantity":9}')
+                ]
+            ),
+            FakeMessage(content="done"),
+        ),
+        execute_tool=executor,
+    )
+
+    content = [m for m in state["messages"] if m.get("role") == "tool"][0]["content"]
+    assert "Only 3 available" in content
+    assert "cart would hold 9" in content
+
+
+async def test_an_identical_failed_call_is_refused_rather_than_repeated():
+    # The MUST PROVE of this task. The model asks for the same thing twice;
+    # the second attempt never reaches the MCP server.
+    executor = failing_executor(
+        "Error calling tool 'add_to_cart': 409: Only 17 available; cart would hold 67"
+    )
+
+    same_call = '{"product_id":"p1","quantity":67}'
+    state = await run_turn(
+        "add 67 headphones",
+        model_call=scripted_model(
+            FakeMessage(tool_calls=[FakeToolCall("call_1", "add_to_cart", same_call)]),
+            FakeMessage(tool_calls=[FakeToolCall("call_2", "add_to_cart", same_call)]),
+            FakeMessage(content="I'll stop asking for 67."),
+        ),
+        execute_tool=executor,
+    )
+
+    # Executed once. The repeat was refused before it left the process.
+    assert len(executor.calls) == 1
+
+    tool_messages = [m for m in state["messages"] if m.get("role") == "tool"]
+    assert len(tool_messages) == 2
+    assert "already" in tool_messages[1]["content"].lower()
+
+
+async def test_a_different_quantity_after_a_failure_is_allowed_through():
+    # The guard blocks the identical call, not the retry. Asking for a
+    # smaller number is exactly what the 409 is telling it to do.
+    from fastmcp.exceptions import ToolError
+
+    calls = []
+
+    async def execute(name, arguments):
+        calls.append(arguments["quantity"])
+        if arguments["quantity"] > 17:
+            raise ToolError(
+                "Error calling tool 'add_to_cart': 409: Only 17 available; "
+                f"cart would hold {arguments['quantity']}"
+            )
+        return {"itemCount": arguments["quantity"]}
+
+    state = await run_turn(
+        "add 67 headphones",
+        model_call=scripted_model(
+            FakeMessage(
+                tool_calls=[
+                    FakeToolCall("call_1", "add_to_cart", '{"product_id":"p1","quantity":67}')
+                ]
+            ),
+            FakeMessage(
+                tool_calls=[
+                    FakeToolCall("call_2", "add_to_cart", '{"product_id":"p1","quantity":17}')
+                ]
+            ),
+            FakeMessage(content="Added 17."),
+        ),
+        execute_tool=execute,
+    )
+
+    assert calls == [67, 17]
+    assert state["answer"] == "Added 17."
+
+
+async def test_a_forbidden_argument_still_raises_rather_than_becoming_a_result():
+    # An identity argument is not a recoverable tool failure the model
+    # should get a chance to work around - it is a refusal.
+    executor = recording_executor({})
+
+    with pytest.raises(ForbiddenArgumentError):
+        await run_turn(
+            "orders",
+            model_call=scripted_model(
+                FakeMessage(
+                    tool_calls=[FakeToolCall("call_1", "get_orders", '{"user_id":"u1"}')]
+                )
+            ),
+            execute_tool=executor,
+        )
