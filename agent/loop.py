@@ -18,6 +18,7 @@ arrive with the approval machinery that guards them.
 
 import json
 import operator
+from contextlib import asynccontextmanager
 from typing import Annotated, Any, Awaitable, Callable, TypedDict
 
 from fastmcp.exceptions import ToolError
@@ -213,27 +214,71 @@ def openai_model_call(model: str | None = None) -> ModelCall:
     return call
 
 
-def mcp_tool_executor(token: str, url: str | None = None) -> ToolExecutor:
-    """The real tool execution, one MCP session per call."""
+class McpSession:
+    """One MCP session, and the executor that rides it.
+
+    The session id is exposed because an approval token is minted against
+    it: the storefront's approve route needs the id of the session the
+    resumed call will actually use. A session per call would make that id
+    a different one every time -- verified against production, and the
+    third session-identity bug this project has had.
+    """
+
+    def __init__(self, client):
+        self._client = client
+        # Cached while the transport is live. Read after it closes it is
+        # None, and the storefront would mint against nothing.
+        self._session_id = None
+
+    @property
+    def session_id(self) -> str | None:
+        return self._session_id
+
+    async def execute(self, name: str, arguments: dict) -> Any:
+        result = await self._client.call_tool(name, arguments)
+        return json.loads(result.content[0].text) if result.content else None
+
+
+def _client_for(url: str, token: str):
+    """Seam. Tests replace this rather than the transport machinery."""
     from fastmcp import Client
 
-    async def execute(name: str, arguments: dict) -> Any:
-        transport = build_transport(url or config.MCP_SERVER_URL, token)
+    return Client(build_transport(url, token))
 
-        async with Client(transport) as client:
-            result = await client.call_tool(name, arguments)
-            return json.loads(result.content[0].text) if result.content else None
 
-    return execute
+@asynccontextmanager
+async def session_scoped_executor(token: str, url: str | None = None):
+    """Hold one MCP session for the life of a turn.
+
+    Held rather than reopened because an approval pause happens in the
+    middle of a turn, and the token minted during that pause is only
+    valid on the session it was minted against.
+    """
+    client = _client_for(url or config.MCP_SERVER_URL, token)
+
+    async with client:
+        session = McpSession(client)
+        session._session_id = client.transport.get_session_id()
+        yield session
 
 
 async def answer(utterance: str, token: str, *, model: str | None = None) -> TurnState:
-    """The whole thing wired to the real model and the real MCP server."""
+    """The whole thing wired to the real model and the real MCP server.
+
+    One session for the turn, because an approval pause happens in the
+    middle of one and the token is minted against the session id.
+    """
     tools = await list_openai_tools(token, only=AGENT_TOOLS)
 
-    return await run_turn(
-        utterance,
-        model_call=openai_model_call(model),
-        execute_tool=mcp_tool_executor(token),
-        tools=tools,
-    )
+    async with session_scoped_executor(token) as session:
+        state = await run_turn(
+            utterance,
+            model_call=openai_model_call(model),
+            execute_tool=session.execute,
+            tools=tools,
+        )
+
+    # The id the storefront must mint against. Server-side only: it is
+    # deliberately NOT in the event stream, which reaches a browser.
+    state["session_id"] = session.session_id
+    return state
