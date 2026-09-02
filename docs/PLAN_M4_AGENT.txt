@@ -99,10 +99,23 @@ CONTENTS
     Write the test that asserts it. An agent that can approve itself makes
     every other control in this system decorative.
 
+(D) DECIDE THE COST CEILING NOW, NOT AFTER THE FIRST BILL.
+
+    Every conversation spends money, and a looping agent spends more.
+    Section 3 already requires measuring tokens per workflow from the
+    first eval run. Measuring is not the same as having a limit.
+
+    RECOMMENDED: pick a concrete per-conversation token or cost cap before
+    launch, and decide the behaviour at that cap in advance - a graceful
+    "I need to hand this to a person" message, not a silent truncation or
+    an unbounded loop that only shows up on an invoice.
+
     IN PLAIN TERMS
-    Three decisions. The critical one: the AI must never be able to give
+    Four decisions. The critical one: the AI must never be able to give
     itself permission for a dangerous action. A person clicks, the shop
-    issues the permission, and the AI only ever receives it.
+    issues the permission, and the AI only ever receives it. The fourth:
+    decide the spending limit before the AI goes live, and decide what it
+    says when it hits that limit - do not find either one out from a bill.
 
 
 ================================================================================
@@ -285,7 +298,11 @@ has never been a way to measure tool selection.
                                 agent and reports
 
     REPORTED       pass rate, tool-selection accuracy, turn latency,
-                   tokens consumed
+                   tokens consumed, and whether an UNEXPECTED tool call
+                   happened beyond what the workflow fixture expects - a
+                   signal that an injected instruction moved the agent
+                   even when the guarded tools themselves were never
+                   reached
 
     WRITES         metrics/agent-evals.json, in the shape the storefront's
                    scorecard reads. Same arrangement as Phase 1: the sweep
@@ -362,13 +379,22 @@ Workflow pass rate becomes a scorecard gate in the storefront's Task 8.
 
     * COST IS NOW A LIVE VARIABLE. Every conversation spends money, and an
       agent that loops spends more. Measure tokens per workflow from the
-      first eval run, not after the first bill.
+      first eval run, not after the first bill. Section 1's Decision D
+      sets a ceiling before launch; this is what it protects against.
+
+    * TOOL-SELECTION ANOMALY DETECTION IS EVAL-TIME ONLY, NOT RUNTIME.
+      The eval harness (section 5) now scores unexpected tool calls
+      against known fixtures. Nothing watches a LIVE conversation's tool
+      sequence for the same drift. Flagged, not scoped - worth its own
+      design pass if injected content in review or description text turns
+      out to be a live problem rather than a theoretical one.
 
     IN PLAIN TERMS
-    Four known problems carried into this stage. Two are worth watching
+    Five known problems carried into this stage. Two are worth watching
     closely: hidden instructions inside product reviews now have a design
     to follow, but Task 6 has not been built yet, and from this point
     onwards every conversation costs real money - so it is measured from
-    day one rather than discovered later.
+    day one, capped by Section 1's Decision D, rather than discovered
+    later.
 
 ================================================================================
