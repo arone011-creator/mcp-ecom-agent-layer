@@ -61,6 +61,17 @@ READ_ONLY_TOOLS = frozenset(
     }
 )
 
+# Medium risk: they change something, and they execute without a gate.
+# Reversible in both directions -- remove what was added, re-add what was
+# removed -- and the API scopes both to the caller's own cart.
+MEDIUM_RISK_TOOLS = frozenset({"add_to_cart", "remove_from_cart"})
+
+# What the agent is offered today. cancel_order is deliberately absent:
+# it is High risk and only becomes reachable with the approval machinery
+# in Task 5. A tool the agent is never shown is one it cannot call.
+AGENT_TOOLS = READ_ONLY_TOOLS | MEDIUM_RISK_TOOLS
+
+
 # Identity is never an argument. It is resolved from the bearer token by
 # the API's own whoami, and a model supplying one of these is the model
 # asserting who the caller is. None of the nine schemas contain these --

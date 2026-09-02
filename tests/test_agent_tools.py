@@ -196,3 +196,28 @@ def test_the_guard_names_the_offending_key():
         reject_forbidden_arguments("get_orders", {"user_id": "u1", "limit": 5})
 
     assert "user_id" in str(caught.value)
+
+
+def test_the_medium_risk_surface_is_the_two_cart_writes():
+    from agent.tools import MEDIUM_RISK_TOOLS
+
+    assert MEDIUM_RISK_TOOLS == {"add_to_cart", "remove_from_cart"}
+
+
+def test_the_agent_surface_is_read_only_plus_medium_but_not_cancel():
+    # cancel_order is High risk and needs the approval machinery that
+    # arrives in Task 5. Until then the agent is not offered it at all.
+    from agent.tools import AGENT_TOOLS
+
+    assert AGENT_TOOLS == READ_ONLY_TOOLS | {"add_to_cart", "remove_from_cart"}
+    assert "cancel_order" not in AGENT_TOOLS
+    assert AGENT_TOOLS < KNOWN_TOOLS
+
+
+def test_the_agent_surface_translates_to_eight_tools():
+    from agent.tools import AGENT_TOOLS
+
+    translated = translate_tools(all_nine(), only=AGENT_TOOLS)
+
+    assert len(translated) == 8
+    assert "cancel_order" not in {t["function"]["name"] for t in translated}
