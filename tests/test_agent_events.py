@@ -20,6 +20,14 @@ from agent.events import (
     tool_completed,
     tool_started,
 )
+from agent.loop import run_turn
+from tests.test_agent_loop import (
+    FakeMessage,
+    FakeToolCall,
+    failing_executor,
+    recording_executor,
+    scripted_model,
+)
 
 
 def test_every_event_carries_the_schema_version():
@@ -139,3 +147,114 @@ def test_replay_reports_a_gap_rather_than_hiding_it():
 def test_replay_rejects_a_stream_from_a_future_schema():
     with pytest.raises(ValueError):
         replay([{"v": 2, "seq": 0, "type": "message", "data": {"text": "hi"}}])
+
+
+# --- emission from the turn loop -----------------------------------------
+
+
+def one_tool_turn():
+    """The stock 'what did I order' turn, scripted. Used by several tests."""
+    return {
+        "model_call": scripted_model(
+            FakeMessage(tool_calls=[FakeToolCall("call_1", "get_orders", '{"limit":3}')]),
+            FakeMessage(content="You ordered ORD-1."),
+        ),
+        "execute_tool": recording_executor({"get_orders": [{"orderNumber": "ORD-1"}]}),
+    }
+
+
+async def test_a_turn_emits_the_events_its_conversation_is_made_of():
+    state = await run_turn("what did I order recently?", **one_tool_turn())
+
+    assert [event["type"] for event in state["events"]] == [
+        "tool_started",
+        "tool_completed",
+        "message",
+    ]
+
+
+async def test_the_emitted_stream_replays_to_the_conversation_that_happened():
+    # The MUST PROVE. What the UI reconstructs from events must be what
+    # the turn actually did - not an approximation assembled beside it.
+    state = await run_turn("what did I order recently?", **one_tool_turn())
+
+    conversation = replay(state["events"])
+
+    assert conversation["text"] == [state["answer"]]
+    assert conversation["gaps"] == []
+    assert conversation["tools"][0]["tool"] == "get_orders"
+    assert conversation["tools"][0]["arguments"] == {"limit": 3}
+    assert conversation["tools"][0]["ok"] is True
+
+
+async def test_sequence_numbers_are_monotonic_across_several_model_turns():
+    state = await run_turn(
+        "compare two products",
+        model_call=scripted_model(
+            FakeMessage(
+                tool_calls=[
+                    FakeToolCall("call_1", "get_product", '{"product_id":"p1"}'),
+                    FakeToolCall("call_2", "get_product", '{"product_id":"p2"}'),
+                ]
+            ),
+            FakeMessage(content="compared"),
+        ),
+        execute_tool=recording_executor({}),
+    )
+
+    assert [event["seq"] for event in state["events"]] == list(
+        range(len(state["events"]))
+    )
+
+
+async def test_a_tool_failure_becomes_a_completed_event_not_a_lost_one():
+    state = await run_turn(
+        "add 57 headphones",
+        model_call=scripted_model(
+            FakeMessage(
+                tool_calls=[
+                    FakeToolCall(
+                        "call_1", "add_to_cart", '{"product_id":"p1","quantity":57}'
+                    )
+                ]
+            ),
+            FakeMessage(content="Only 17 are available."),
+        ),
+        execute_tool=failing_executor("409: Only 17 available; cart would hold 57"),
+    )
+
+    completed = [e for e in state["events"] if e["type"] == "tool_completed"][0]
+    assert completed["data"]["ok"] is False
+    assert "Only 17 available" in completed["data"]["error"]
+
+
+async def test_a_refused_repeat_is_reported_rather_than_left_hanging():
+    # The repeat guard short-circuits before the executor. Without an
+    # explicit completion the UI would show a chip that spins forever.
+    same_call = '{"product_id":"p1","quantity":57}'
+    state = await run_turn(
+        "add 57 headphones",
+        model_call=scripted_model(
+            FakeMessage(tool_calls=[FakeToolCall("call_1", "add_to_cart", same_call)]),
+            FakeMessage(tool_calls=[FakeToolCall("call_2", "add_to_cart", same_call)]),
+            FakeMessage(content="I'll stop asking for 57."),
+        ),
+        execute_tool=failing_executor("409: Only 17 available; cart would hold 57"),
+    )
+
+    conversation = replay(state["events"])
+
+    assert len(conversation["tools"]) == 2
+    # Both chips resolve. Neither is left started-but-never-finished.
+    assert all("ok" in tool for tool in conversation["tools"])
+    assert conversation["gaps"] == []
+
+
+async def test_no_bearer_token_or_identity_ever_appears_in_the_stream():
+    # These events leave this process for a browser. Anything in them is
+    # published.
+    state = await run_turn("what did I order recently?", **one_tool_turn())
+
+    serialised = json.dumps(state["events"]).lower()
+    assert "bearer" not in serialised
+    assert "authorization" not in serialised

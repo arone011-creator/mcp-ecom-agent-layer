@@ -24,6 +24,8 @@ from fastmcp.exceptions import ToolError
 from langgraph.graph import END, START, StateGraph
 
 import config
+from agent.events import message as message_event
+from agent.events import tool_completed, tool_started
 from agent.tools import (
     AGENT_TOOLS,
     build_transport,
@@ -42,6 +44,10 @@ class TurnState(TypedDict, total=False):
     # Every (tool, arguments) pair that has already failed this turn.
     # Accumulated so the loop can refuse an identical retry.
     failed: Annotated[list[str], operator.add]
+    # The stream the chat UI is built from. Accumulated by the same
+    # reducer as messages, so a node returns only what it added. The
+    # shape is agent/events.py, which the storefront also implements.
+    events: Annotated[list[dict], operator.add]
 
 
 def _tool_calls_of(message: dict) -> list[dict]:
@@ -51,6 +57,17 @@ def _tool_calls_of(message: dict) -> list[dict]:
 def _signature(name: str, arguments: dict) -> str:
     """Identifies one exact call, so a repeat of it can be recognised."""
     return json.dumps({"tool": name, "args": arguments}, sort_keys=True)
+
+
+def _next_seq(state: TurnState) -> int:
+    """The next sequence number, derived from what has already been emitted.
+
+    LangGraph nodes return only their additions, so a counter held in a
+    node would restart on the next pass through it. The accumulated
+    length is the one number both nodes can agree on without sharing
+    state of their own.
+    """
+    return len(state.get("events", []))
 
 
 def _tool_message(call_id: str, payload) -> dict:
@@ -74,12 +91,21 @@ def build_graph(
         # field on the way back in.
         dumped.setdefault("role", "assistant")
 
-        return {"messages": [dumped], "answer": message.content}
+        # A tool turn has no prose, and an empty message event would be a
+        # blank bubble in the chat.
+        events = [message_event(_next_seq(state), message.content)] if message.content else []
+
+        return {"messages": [dumped], "answer": message.content, "events": events}
 
     async def execute_tools(state: TurnState) -> dict:
         results = []
+        events = []
         newly_failed = []
         already_failed = set(state.get("failed", []))
+        # This node emits several events; each needs its own number, and
+        # they cannot come from _next_seq because state does not change
+        # until the node returns.
+        seq = _next_seq(state)
 
         for call in _tool_calls_of(state["messages"][-1]):
             name = call["function"]["name"]
@@ -92,18 +118,22 @@ def build_graph(
             reject_forbidden_arguments(name, arguments)
 
             signature = _signature(name, arguments)
+            call_id = call["id"]
+
+            events.append(tool_started(seq, call_id, name, arguments))
+            seq += 1
 
             if signature in already_failed:
-                results.append(
-                    _tool_message(
-                        call["id"],
-                        {
-                            "error": "This exact call was already tried this turn "
-                            "and failed. Read the earlier error and change the "
-                            "arguments rather than repeating it."
-                        },
-                    )
+                refusal = (
+                    "This exact call was already tried this turn and failed. "
+                    "Read the earlier error and change the arguments rather "
+                    "than repeating it."
                 )
+                results.append(_tool_message(call_id, {"error": refusal}))
+                # Emitted even though nothing ran: a start without a
+                # completion is a chip that spins forever.
+                events.append(tool_completed(seq, call_id, name, error=refusal))
+                seq += 1
                 continue
 
             try:
@@ -114,12 +144,16 @@ def build_graph(
                 # available -- and re-wording or parsing them here would
                 # be a second implementation of someone else's rule.
                 newly_failed.append(signature)
-                results.append(_tool_message(call["id"], {"error": str(failure)}))
+                results.append(_tool_message(call_id, {"error": str(failure)}))
+                events.append(tool_completed(seq, call_id, name, error=str(failure)))
+                seq += 1
                 continue
 
-            results.append(_tool_message(call["id"], result))
+            results.append(_tool_message(call_id, result))
+            events.append(tool_completed(seq, call_id, name, result=result))
+            seq += 1
 
-        return {"messages": results, "failed": newly_failed}
+        return {"messages": results, "failed": newly_failed, "events": events}
 
     def route(state: TurnState) -> str:
         return "tools" if _tool_calls_of(state["messages"][-1]) else END
@@ -151,6 +185,7 @@ async def run_turn(
             "tools": tools or [],
             "answer": None,
             "failed": [],
+            "events": [],
         },
         # A confused agent stops rather than looping. The repeat guard
         # already blocks the obvious case; this bounds the rest, and is
