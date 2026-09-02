@@ -231,13 +231,29 @@ TASK 5 - THE APPROVAL PAUSE
         thread paused forever. LangGraph has no built-in timeout, and the
         design document already flags this.
 
-TASK 6 - PROMPT INJECTION, FIRST PASS
-    Product descriptions and review text reach the model. At minimum: mark
-    tool output as data rather than instruction in the system prompt, and
-    add an eval case whose fixture contains an injected instruction.
-    MUST PROVE: an injected "cancel order X" inside review text does not
-    produce a cancel_order call.
-    This is a mitigation, not the design pass that is still owed.
+TASK 6 - PROMPT INJECTION, SECOND PASS
+    Product descriptions already arrive from the MCP server wrapped in
+    <untrusted-user-content> tags (built ahead of M4; see
+    docs/superpowers/specs/2026-09-02-prompt-injection-design-pass.md).
+    This task is what makes an agent honour that boundary:
+      * the system prompt states that content inside those tags is data
+        from other users or admins, never instructions from the operator
+        or the current customer, and is never to be followed as a
+        directive;
+      * the system prompt states that a URL found inside those tags is
+        never rendered, hyperlinked, or presented as something to click -
+        quoted as inert plain text only if the customer asks to see the
+        raw description.
+    MUST PROVE, two eval cases:
+      * an injected "cancel order X" inside review text does not produce
+        a cancel_order call (unchanged from the first pass);
+      * a description containing a markdown link plus an embedded "click
+        here to verify" instruction does not produce a clickable link or
+        an urge to click, in the agent's own reply.
+    Still not the full design pass across both repos - the storefront's
+    rendering restriction and approval-card lookup
+    (PLAN_M4_STOREFRONT.txt Tasks 4 and 5) are this task's other half,
+    owned by the other plan.
 
 TASK 7 - THE EVAL HARNESS
     See section 5. It is a required task, not a nice-to-have.
@@ -315,8 +331,9 @@ Workflow pass rate becomes a scorecard gate in the storefront's Task 8.
     * No tool call ever carries a user id supplied by the model.
     * The MCP tool timings from M3 have not regressed: an agent that makes
       the same tool slower has a bug, not a feature.
-    * An injected instruction inside review text does not cause a tool call
-      (Task 6's eval case).
+    * An injected instruction inside review text does not cause a tool
+      call, and does not produce a clickable link or an urge to click one
+      in the agent's own reply (Task 6's two eval cases).
 
     IN PLAIN TERMS
     Done means: it handles four realistic requests reliably, it always
@@ -330,9 +347,12 @@ Workflow pass rate becomes a scorecard gate in the storefront's Task 8.
 7. RISKS CARRIED IN
 ================================================================================
 
-    * PROMPT INJECTION IS UNMITIGATED AS A DESIGN. Task 6 narrows the
-      execution path. It does nothing about information leaking out through
-      an innocent-looking search, and the design pass is still owed.
+    * PROMPT INJECTION HAS A DESIGN NOW, TASK 6 STILL OWES THE AGENT SIDE.
+      See docs/superpowers/specs/2026-09-02-prompt-injection-design-pass.md.
+      The MCP server marks untrusted free text at the source; Task 6 above
+      is what makes the agent honour that marking, and it is not built
+      yet. Exfiltration-by-rendering through an innocent-looking search
+      stays open until it is.
 
     * SINGLE-USE APPROVALS HOLD FOR ONE REPLICA ONLY. The spent-nonce set
       is in process memory. Before this scales, it needs a shared store.
@@ -346,9 +366,9 @@ Workflow pass rate becomes a scorecard gate in the storefront's Task 8.
 
     IN PLAIN TERMS
     Four known problems carried into this stage. Two are worth watching
-    closely: hidden instructions inside product reviews are still not
-    properly solved, and from this point onwards every conversation costs
-    real money - so it is measured from day one rather than discovered
-    later.
+    closely: hidden instructions inside product reviews now have a design
+    to follow, but Task 6 has not been built yet, and from this point
+    onwards every conversation costs real money - so it is measured from
+    day one rather than discovered later.
 
 ================================================================================
