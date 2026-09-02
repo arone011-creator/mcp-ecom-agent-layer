@@ -268,8 +268,15 @@ async def run_turn(
     max_steps: int = 25,
     approve: ApprovalCallback | None = None,
     approval_timeout_seconds: float = 300.0,
+    session_id: str | None = None,
 ) -> TurnState:
-    """One turn, start to finish, pausing for approval where required."""
+    """One turn, start to finish, pausing for approval where required.
+
+    `session_id` is the MCP session this turn's calls ride on. It is
+    passed to `approve` because a token is only valid on the session it
+    was minted against, and it travels there -- a server-side callback
+    argument -- rather than in the event stream, which reaches a browser.
+    """
     app = build_graph(model_call, execute_tool, checkpointer=InMemorySaver())
 
     settings = {
@@ -294,7 +301,9 @@ async def run_turn(
     )
 
     while state.get("__interrupt__"):
-        requests = [item.value for item in state["__interrupt__"]]
+        requests = [
+            {**item.value, "session_id": session_id} for item in state["__interrupt__"]
+        ]
 
         if approve is None:
             # The safe default. A turn with no way to reach a human must
@@ -407,6 +416,7 @@ async def answer(
             tools=tools,
             approve=approve,
             approval_timeout_seconds=approval_timeout_seconds,
+            session_id=session.session_id,
         )
 
     # The id the storefront must mint against. Server-side only: it is

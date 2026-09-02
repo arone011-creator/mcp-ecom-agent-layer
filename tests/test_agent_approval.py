@@ -314,6 +314,31 @@ async def test_a_timeout_is_a_refusal_and_never_a_grant():
     assert executor.calls == []
 
 
+async def test_the_approval_request_carries_the_session_to_mint_against():
+    # The storefront mints by calling the MCP server's /approvals with
+    # THIS session's id -- a token minted against any other session is
+    # rejected. It arrives here, in the server-side callback argument,
+    # and deliberately NOT in the approval_required event, which reaches
+    # a browser.
+    seen = {}
+
+    async def approve(request):
+        seen.update(request)
+        return {"approved": False}
+
+    state = await run_turn(
+        "cancel my most recent order",
+        model_call=cancel_turn(),
+        execute_tool=recording_executor({}),
+        approve=approve,
+        session_id="session-xyz",
+    )
+
+    assert seen["session_id"] == "session-xyz"
+    event = [e for e in state["events"] if e["type"] == "approval_required"][0]
+    assert "session-xyz" not in json.dumps(event)
+
+
 async def test_a_turn_with_no_way_to_ask_a_human_refuses_rather_than_proceeding():
     # The safe default. An agent deployed without an approval channel must
     # not behave as though every request had been granted.
