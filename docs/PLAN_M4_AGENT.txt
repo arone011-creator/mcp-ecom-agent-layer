@@ -283,11 +283,52 @@ TASK 3 - MEDIUM-RISK TOOLS    [DONE 2026-09-02]
     storefront freezes in its own Task 1, and inventing that contract early
     is how the two halves end up disagreeing.
 
-TASK 4 - EVENT EMISSION
+TASK 4 - EVENT EMISSION    [DONE 2026-09-02]
     Emit the five events the storefront plan defines. Same schema, same
     version - agree it in one place and import it, do not describe it twice.
     MUST PROVE: an event stream can be replayed into the UI and produces
     the same conversation.
+
+    Proved twice. In tests/test_agent_events.py, replaying a turn's own
+    stream reconstructs its answer, its tool, and that tool's structured
+    arguments, with no sequence gaps. And against production on gpt-4.1:
+    a real "what did I order recently" turn emitted tool_started ->
+    tool_completed -> message, replayed to exactly the answer the turn
+    returned, with no gaps, every tool resolved, and no bearer token
+    anywhere in the stream.
+
+    "Agree it in one place and import it" could not be taken literally -
+    the two halves are separate repositories in different languages, so
+    there is no module to import. The one place is an ARTEFACT instead:
+    contracts/assistant-events.v1.json, a recorded stream covering all
+    five types beside the conversation replaying it must produce. This
+    repository executes it in Python; the storefront vendors the same
+    file and executes it in TypeScript. A shape change reddens tests on
+    the side that made it. contracts/README.md is canonical prose.
+
+    Two departures from PLAN_M4_STOREFRONT.txt section 3, both recorded
+    in that file and in the storefront's own Task 1:
+      * approval_required carries NO token handle. The storefront mints
+        after the click, from the arguments in the event; a handle minted
+        here would be the agent taking part in its own approval.
+      * tool_completed carries NO cache-invalidation hint. Which cache
+        key a tool touches is the storefront's knowledge, and an agent
+        shipping cache keys would be this repository asserting facts
+        about a UI it cannot see.
+
+    Not in scope, deliberately: streaming transport. Events accumulate in
+    turn state through the same reducer as messages; putting them on a
+    wire as they happen is the bridge route's job (storefront Task 3)
+    against an agent HTTP surface that does not exist until Task 8.
+    approval_required is defined, fixtured and replayable, but nothing
+    emits it - the agent is not offered a high-risk tool at all until
+    Task 5. Freezing the shape now leaves Task 5 nothing to invent.
+
+    One behaviour worth naming, found while writing the tests: the repeat
+    guard from Task 3 short-circuits before the executor, so a refused
+    repeat would have emitted a start with no completion - a chip that
+    spins forever, at exactly the moment a customer is watching. It now
+    emits a completion carrying the refusal.
 
 TASK 5 - THE APPROVAL PAUSE
     On a high-risk tool: emit approval_required with STRUCTURED arguments,
