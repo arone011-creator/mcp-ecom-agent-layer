@@ -268,3 +268,64 @@ async def test_the_agent_never_mints_its_own_approval():
     assert "/approvals" not in source
     assert "import approvals" not in source
     assert "from approvals" not in source
+
+
+# --- a pause nobody answers ----------------------------------------------
+
+
+async def test_an_unanswered_pause_times_out_rather_than_waiting_forever():
+    # LangGraph has no built-in timeout; the design document flags this.
+    # A held MCP session makes it a resource leak, not just an idle task.
+    executor = recording_executor({})
+
+    async def never_answers(request):
+        await asyncio.sleep(3600)
+
+    state = await run_turn(
+        "cancel my most recent order",
+        model_call=cancel_turn(),
+        execute_tool=executor,
+        approve=never_answers,
+        approval_timeout_seconds=0.05,
+    )
+
+    assert executor.calls == []
+    tool = replay(state["events"])["tools"][0]
+    assert tool["ok"] is False
+    assert "expired" in tool["error"].lower()
+
+
+async def test_a_timeout_is_a_refusal_and_never_a_grant():
+    # The direction of the default is the whole point. A deadline passing
+    # must never be indistinguishable from a human saying yes.
+    executor = recording_executor({"cancel_order": {"status": "CANCELLED"}})
+
+    async def never_answers(request):
+        await asyncio.sleep(3600)
+
+    await run_turn(
+        "cancel my most recent order",
+        model_call=cancel_turn(),
+        execute_tool=executor,
+        approve=never_answers,
+        approval_timeout_seconds=0.05,
+    )
+
+    assert executor.calls == []
+
+
+async def test_a_turn_with_no_way_to_ask_a_human_refuses_rather_than_proceeding():
+    # The safe default. An agent deployed without an approval channel must
+    # not behave as though every request had been granted.
+    executor = recording_executor({})
+
+    state = await run_turn(
+        "cancel my most recent order",
+        model_call=cancel_turn(),
+        execute_tool=executor,
+    )
+
+    assert executor.calls == []
+    # The model's words; nothing actually happened.
+    assert state["answer"] == "Cancelled."
+    assert replay(state["events"])["tools"][0]["ok"] is False
