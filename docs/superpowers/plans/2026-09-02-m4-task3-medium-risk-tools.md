@@ -21,6 +21,36 @@
 
 **3. "Informational event, not a blocking prompt" needs no code here.** Medium-risk tools execute without a gate, which is already the behaviour — there is nothing to build. The *event* half arrives with the event schema in the parent plan's Task 4; building an event emitter now would be inventing a contract the storefront has not frozen yet.
 
+**Executed 2026-09-02. MUST PROVE met; one finding the plan did not expect.**
+
+The live gate needed a second run to actually prove anything, and the
+reason is worth keeping.
+
+Asked plainly — *"add 57 of the Wireless Headphones"* when 17 were in
+stock — the agent **checked inventory first and declined to over-ask at
+all**, answering "there are only 17 available, shall I add those instead?"
+That is better behaviour than the gate assumed, but it means the 409 path
+never fired, so the run proved nothing about error handling.
+
+Forcing it through the real executor with a scripted over-ask did prove
+it, against production:
+
+```
+tool result: {"error": "Error calling tool 'add_to_cart': 409: Only 17 available; cart would hold 57"}
+tool result: {"items": [{"quantity": 17, ...}]}
+ANSWER: Added the available stock.
+```
+
+The 409 became a result rather than killing the turn, carried the number
+verbatim, and the retry for 17 succeeded and created a real cart line
+(cleared afterwards).
+
+**The lesson for the eval harness (parent plan Task 7):** a workflow
+fixture that assumes the model will make the mistake will not reliably
+exercise the error path, because a good model avoids the mistake. The
+deterministic proof has to live in the unit tests; the live run can only
+confirm the plumbing.
+
 ---
 
 ## File Structure
@@ -38,7 +68,7 @@
 
 **Files:** `agent/tools.py`, `tests/test_agent_tools.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_agent_tools.py`:
 
@@ -68,12 +98,12 @@ def test_the_agent_surface_translates_to_eight_tools():
     assert "cancel_order" not in {t["function"]["name"] for t in translated}
 ```
 
-- [ ] **Step 2: Run them, confirm they fail**
+- [x] **Step 2: Run them, confirm they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_agent_tools.py -q`
 Expected: `ImportError: cannot import name 'MEDIUM_RISK_TOOLS'`.
 
-- [ ] **Step 3: Add the two sets**
+- [x] **Step 3: Add the two sets**
 
 In `agent/tools.py`, find:
 ```python
@@ -95,7 +125,7 @@ AGENT_TOOLS = READ_ONLY_TOOLS | MEDIUM_RISK_TOOLS
 
 ```
 
-- [ ] **Step 4: Run the tests, then the suite**
+- [x] **Step 4: Run the tests, then the suite**
 
 Run: `.venv/Scripts/python -m pytest tests/test_agent_tools.py -q`
 Expected: 19 passed.
@@ -103,7 +133,7 @@ Expected: 19 passed.
 Run: `.venv/Scripts/python -m pytest -q`
 Expected: 143 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add agent/tools.py tests/test_agent_tools.py
@@ -124,7 +154,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Files:** `tests/test_agent_loop.py`, `agent/loop.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_agent_loop.py`:
 
@@ -277,12 +307,12 @@ async def test_a_forbidden_argument_still_raises_rather_than_becoming_a_result()
         )
 ```
 
-- [ ] **Step 2: Run them, confirm they fail**
+- [x] **Step 2: Run them, confirm they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_agent_loop.py -q`
 Expected: the new tests fail — `ToolError` propagates out of `run_turn` instead of becoming a tool result.
 
-- [ ] **Step 3: Handle tool failures in the loop**
+- [x] **Step 3: Handle tool failures in the loop**
 
 In `agent/loop.py`, find:
 ```python
@@ -412,7 +442,7 @@ from fastmcp.exceptions import ToolError
 from langgraph.graph import END, START, StateGraph
 ```
 
-- [ ] **Step 4: Seed and cap the turn**
+- [x] **Step 4: Seed and cap the turn**
 
 Find:
 ```python
@@ -464,7 +494,7 @@ async def run_turn(
 ) -> TurnState:
 ```
 
-- [ ] **Step 5: Point the real wiring at the fuller surface**
+- [x] **Step 5: Point the real wiring at the fuller surface**
 
 Find:
 ```python
@@ -496,7 +526,7 @@ Replace with:
     tools = await list_openai_tools(token, only=AGENT_TOOLS)
 ```
 
-- [ ] **Step 6: Run the tests, then the suite**
+- [x] **Step 6: Run the tests, then the suite**
 
 Run: `.venv/Scripts/python -m pytest tests/test_agent_loop.py -q`
 Expected: 11 passed (6 existing + 5 new).
@@ -504,7 +534,7 @@ Expected: 11 passed (6 existing + 5 new).
 Run: `.venv/Scripts/python -m pytest -q`
 Expected: 148 passed.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add agent/loop.py tests/test_agent_loop.py
@@ -531,7 +561,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Files:** none modified.
 
-- [ ] **Step 1: Ask for more than exists, against production**
+- [x] **Step 1: Ask for more than exists, against production**
 
 ```bash
 .venv/Scripts/python -c "
@@ -577,7 +607,7 @@ with a **smaller** quantity, or an answer telling the customer only N are
 available. Both satisfy the MUST PROVE; what must NOT appear is the same
 quantity requested twice.
 
-- [ ] **Step 2: Tidy the demo cart**
+- [x] **Step 2: Tidy the demo cart**
 
 The run may leave items in the demo customer's cart. Clear it so the next
 person starts from a known state:
@@ -609,7 +639,7 @@ No commit — nothing under version control changed.
 
 **Files:** `docs/PLAN_M4_AGENT.txt`
 
-- [ ] **Step 1: Record the outcome**
+- [x] **Step 1: Record the outcome**
 
 Find:
 ```
@@ -649,7 +679,7 @@ TASK 3 - MEDIUM-RISK TOOLS    [DONE 2026-09-02]
     is how the two halves end up disagreeing.
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add docs/PLAN_M4_AGENT.txt
@@ -666,7 +696,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ### Task 5: Push
 
-- [ ] **Step 1: Review pending, then push after user confirmation**
+- [x] **Step 1: Review pending, then push after user confirmation**
 
 ```bash
 git log --oneline origin/main..HEAD
