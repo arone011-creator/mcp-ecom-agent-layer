@@ -81,3 +81,71 @@ def approval_required(
 def error(seq: int, message: str, *, retryable: bool) -> dict[str, Any]:
     """The turn failed, as distinct from a tool failing."""
     return _envelope(seq, "error", {"message": message, "retryable": retryable})
+
+
+def replay(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Rebuild a conversation from its event stream.
+
+    The reference reducer. The storefront's UI implements the same
+    reduction in TypeScript, and contracts/assistant-events.v1.json is
+    what proves the two agree.
+    """
+    text: list[str] = []
+    tools: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    failures: list[dict[str, Any]] = []
+    seen: list[int] = []
+
+    for event in events:
+        if event.get("v") != SCHEMA_VERSION:
+            raise ValueError(
+                f"Event schema v{event.get('v')} cannot be replayed by a "
+                f"v{SCHEMA_VERSION} reader"
+            )
+
+        seen.append(event["seq"])
+        type_ = event["type"]
+        data = event.get("data", {})
+
+        if type_ == "message":
+            text.append(data["text"])
+
+        elif type_ in ("tool_started", "approval_required"):
+            call_id = data["call_id"]
+            order.append(call_id)
+            tools[call_id] = {
+                "call_id": call_id,
+                "tool": data["tool"],
+                "arguments": data["arguments"],
+            }
+            if type_ == "approval_required":
+                tools[call_id]["awaiting_approval"] = True
+
+        elif type_ == "tool_completed":
+            # A completion without its start still records: half a pair is
+            # a symptom worth seeing, not one worth swallowing.
+            call_id = data["call_id"]
+            if call_id not in tools:
+                order.append(call_id)
+                tools[call_id] = {"call_id": call_id, "tool": data["tool"]}
+            tools[call_id].pop("awaiting_approval", None)
+            tools[call_id]["ok"] = data["ok"]
+            if data["ok"]:
+                tools[call_id]["result"] = data.get("result")
+            else:
+                tools[call_id]["error"] = data["error"]
+
+        elif type_ == "error":
+            failures.append(data)
+
+        # Any other type is ignored on purpose. A newer agent must not be
+        # able to crash an older reader.
+
+    expected = range(min(seen), max(seen) + 1) if seen else []
+
+    return {
+        "text": text,
+        "tools": [tools[call_id] for call_id in order],
+        "errors": failures,
+        "gaps": [seq for seq in expected if seq not in set(seen)],
+    }

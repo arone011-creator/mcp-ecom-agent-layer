@@ -16,6 +16,7 @@ from agent.events import (
     approval_required,
     error,
     message,
+    replay,
     tool_completed,
     tool_started,
 )
@@ -74,3 +75,67 @@ def test_every_event_survives_a_round_trip_through_json():
     event = tool_completed(0, "call_1", "get_orders", result=[{"total": 12.5}])
 
     assert json.loads(json.dumps(event)) == event
+
+
+# --- replay --------------------------------------------------------------
+
+
+def test_replay_reconstructs_the_conversation_in_order():
+    # The MUST PROVE of this task, in its machine-checkable half: the
+    # event stream is a complete record, not a decoration alongside one.
+    events = [
+        tool_started(0, "call_1", "get_orders", {"limit": 3}),
+        tool_completed(1, "call_1", "get_orders", result=[{"orderNumber": "ORD-1"}]),
+        message(2, "You ordered ORD-1."),
+    ]
+
+    conversation = replay(events)
+
+    assert conversation["text"] == ["You ordered ORD-1."]
+    assert conversation["tools"] == [
+        {
+            "call_id": "call_1",
+            "tool": "get_orders",
+            "arguments": {"limit": 3},
+            "ok": True,
+            "result": [{"orderNumber": "ORD-1"}],
+        }
+    ]
+
+
+def test_replay_pairs_a_failure_with_its_start():
+    events = [
+        tool_started(0, "call_1", "add_to_cart", {"product_id": "p1", "quantity": 57}),
+        tool_completed(1, "call_1", "add_to_cart", error="409: Only 17 available"),
+    ]
+
+    tool = replay(events)["tools"][0]
+
+    assert tool["ok"] is False
+    assert tool["arguments"]["quantity"] == 57
+    assert "Only 17 available" in tool["error"]
+
+
+def test_replay_ignores_an_event_type_it_does_not_know():
+    # Forward compatibility in the direction that actually happens: a
+    # newer agent deployed against an older UI must not crash it.
+    events = [
+        message(0, "hi"),
+        {"v": 1, "seq": 1, "type": "thinking_started", "data": {}},
+        message(2, "bye"),
+    ]
+
+    assert replay(events)["text"] == ["hi", "bye"]
+
+
+def test_replay_reports_a_gap_rather_than_hiding_it():
+    # A dropped event means the conversation on screen is not the
+    # conversation that happened. Silence would be the worse failure.
+    events = [message(0, "hi"), message(2, "bye")]
+
+    assert replay(events)["gaps"] == [1]
+
+
+def test_replay_rejects_a_stream_from_a_future_schema():
+    with pytest.raises(ValueError):
+        replay([{"v": 2, "seq": 0, "type": "message", "data": {"text": "hi"}}])
