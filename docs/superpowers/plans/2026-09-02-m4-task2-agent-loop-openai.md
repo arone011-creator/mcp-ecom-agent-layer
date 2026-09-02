@@ -22,6 +22,28 @@
   - `max_completion_tokens` is the current parameter name.
   - `from openai.types.chat import ChatCompletionToolParam` — confirmed importable.
 
+**Executed 2026-09-02. Both MUST PROVEs met; two deviations.**
+
+The live gate is the one that matters: the agent called `get_orders` with
+`{"limit":5}` — schema arguments only, no identity — and answered with the
+demo account's three real orders at exactly the totals and `CANCELLED`
+states left behind by the Phase 1 sweep work earlier the same day
+($1,089.98 / $3,681.96 / $2,385.97). Those numbers could not have been
+invented, which is what makes this end-to-end rather than a mock passing.
+
+Deviations:
+
+1. *Task 1, Step 4* — the plan expected "the 11 tool tests fail, everything
+   else passes." A collection error interrupts the whole pytest run, so
+   nothing else reports at all. Re-ran with `--ignore=tests/test_agent_tools.py`
+   to confirm the other 118 were green. The step's intent held; its
+   instruction was unrunnable as written.
+2. *Task 5, Step 4* — the grep found three stale Claude references the plan
+   only expected in §3: Decision B ("Claude tool definitions"), Task 0
+   ("the Anthropic SDK"), and Task 1 ("Claude tool definitions"). All three
+   contradicted code already shipped, so all three were fixed, and Tasks 0,
+   1 and 2 were marked done with what each actually proved.
+
 ---
 
 ## File Structure
@@ -42,7 +64,7 @@
 
 **Files:** `requirements.txt`, `config.py`
 
-- [ ] **Step 1: Swap the SDK in `requirements.txt`**
+- [x] **Step 1: Swap the SDK in `requirements.txt`**
 
 Find:
 ```
@@ -61,7 +83,7 @@ openai>=3,<4
 pydantic>=2.7,<3
 ```
 
-- [ ] **Step 2: Uninstall the now-unused SDK and reinstall**
+- [x] **Step 2: Uninstall the now-unused SDK and reinstall**
 
 Note: this venv's `pip.exe` shim is broken (exits 1 silently) — use `python -m pip`.
 
@@ -73,7 +95,7 @@ Run:
 Expected: `anthropic` removed; `openai` and `langgraph` present. Confirm:
 `.venv/Scripts/python -c "import openai, langgraph; print(openai.__version__)"` → `3.7.0`.
 
-- [ ] **Step 3: Add the model setting to `config.py`**
+- [x] **Step 3: Add the model setting to `config.py`**
 
 Find:
 ```python
@@ -97,7 +119,7 @@ MCP_SERVER_URL = os.environ.get(
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1")
 ```
 
-- [ ] **Step 4: Confirm the suite still passes**
+- [x] **Step 4: Confirm the suite still passes**
 
 Run: `.venv/Scripts/python -m pytest -q`
 Expected: the 11 tool tests FAIL (they import `to_claude_tool`, which Task 2 renames) — that is expected and is what Task 2 fixes. Everything else passes. If anything *else* broke, stop.
@@ -110,7 +132,7 @@ Do not commit yet — the tree is intentionally red until Task 2.
 
 **Files:** `tests/test_agent_tools.py`, `agent/tools.py`
 
-- [ ] **Step 1: Retarget the tests first**
+- [x] **Step 1: Retarget the tests first**
 
 In `tests/test_agent_tools.py`, change the import block:
 
@@ -264,7 +286,7 @@ Replace with:
     }
 ```
 
-- [ ] **Step 2: Add tests for the read-only filter and the forbidden-argument guard**
+- [x] **Step 2: Add tests for the read-only filter and the forbidden-argument guard**
 
 Append to `tests/test_agent_tools.py`:
 
@@ -312,12 +334,12 @@ def test_the_guard_names_the_offending_key():
     assert "user_id" in str(caught.value)
 ```
 
-- [ ] **Step 3: Run the tests to verify they fail**
+- [x] **Step 3: Run the tests to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_agent_tools.py -q`
 Expected: collection error — `ImportError: cannot import name 'FORBIDDEN_ARGUMENTS'`.
 
-- [ ] **Step 4: Update `agent/tools.py`**
+- [x] **Step 4: Update `agent/tools.py`**
 
 Replace the module docstring's second paragraph and the Claude-specific import/function. Find:
 ```python
@@ -514,12 +536,12 @@ re-nesting is most of the work, and the things that are NOT a re-nesting
 are the point of this module:
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_agent_tools.py -q`
 Expected: 16 passed (11 retargeted + 5 new).
 
-- [ ] **Step 6: Full suite, then commit**
+- [x] **Step 6: Full suite, then commit**
 
 Run: `.venv/Scripts/python -m pytest -q`
 Expected: 134 passed.
@@ -547,7 +569,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Files:** `tests/test_agent_loop.py`, `agent/loop.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_agent_loop.py`:
 
@@ -718,12 +740,12 @@ async def test_the_graph_compiles():
     assert build_graph() is not None
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_agent_loop.py -q`
 Expected: collection error — `ModuleNotFoundError: No module named 'agent.loop'`.
 
-- [ ] **Step 3: Write `agent/loop.py`**
+- [x] **Step 3: Write `agent/loop.py`**
 
 ```python
 """One turn of the agent: utterance in, tool calls out, answer back.
@@ -886,12 +908,12 @@ async def answer(utterance: str, token: str, *, model: str | None = None) -> Tur
     )
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_agent_loop.py -q`
 Expected: 6 passed.
 
-- [ ] **Step 5: Full suite, then commit**
+- [x] **Step 5: Full suite, then commit**
 
 Run: `.venv/Scripts/python -m pytest -q`
 Expected: 140 passed.
@@ -919,7 +941,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Files:** none modified. This is the task's real proof.
 
-- [ ] **Step 1: Run workflow 1 against the live MCP server and a real model**
+- [x] **Step 1: Run workflow 1 against the live MCP server and a real model**
 
 The demo customer's credentials are the seeded fixture in the storefront's
 `signin-form.tsx` (`customer@example.com` / `demo1234`), and a bearer is
@@ -958,7 +980,7 @@ Expected: the agent calls `get_orders` (possibly then `get_order`), and the
 answer describes the demo customer's actual orders — the three seeded ones,
 all `CANCELLED` since the Phase 1 verification work consumed them.
 
-- [ ] **Step 2: Confirm the two MUST PROVEs**
+- [x] **Step 2: Confirm the two MUST PROVEs**
 
 - Workflow 1 ran end to end against the live MCP server: the answer names
   real order data that could only have come from the API.
@@ -979,7 +1001,7 @@ No commit — nothing under version control changed.
 
 §3 is entirely Claude-specific and would be actively wrong left as-is.
 
-- [ ] **Step 1: Rewrite §3's header block**
+- [x] **Step 1: Rewrite §3's header block**
 
 Find:
 ```
@@ -1014,7 +1036,7 @@ Replace with:
                      parameter name: max_tokens is the older spelling.
 ```
 
-- [ ] **Step 2: Replace the five Claude API facts**
+- [x] **Step 2: Replace the five Claude API facts**
 
 Find:
 ```
@@ -1055,7 +1077,7 @@ Verify against the SDK at implementation time rather than trusting this
 list - that habit has now paid off three times.
 ```
 
-- [ ] **Step 3: Note the switch in §1 Decision A**
+- [x] **Step 3: Note the switch in §1 Decision A**
 
 Find:
 ```
@@ -1071,13 +1093,13 @@ Replace with:
     that options 2 and 3 named Anthropic surfaces and no longer apply.
 ```
 
-- [ ] **Step 4: Verify no stale Claude references remain in the model section**
+- [x] **Step 4: Verify no stale Claude references remain in the model section**
 
 Run: `grep -n -i "claude\|anthropic\|budget_tokens\|adaptive" docs/PLAN_M4_AGENT.txt`
 Expected: only the historical mentions inside §1 Decision A's preserved
 option list. If §3 still names Claude anywhere, fix it.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docs/PLAN_M4_AGENT.txt
@@ -1095,12 +1117,12 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ### Task 6: Push
 
-- [ ] **Step 1: Review pending commits**
+- [x] **Step 1: Review pending commits**
 
 Run: `git log --oneline origin/main..HEAD`
 Expected: the three commits from Tasks 2, 3, and 5.
 
-- [ ] **Step 2: Push, after user confirmation**
+- [x] **Step 2: Push, after user confirmation**
 
 ```bash
 git push origin main
