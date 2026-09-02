@@ -248,12 +248,40 @@ TASK 2 - THE LOOP, READ-ONLY TOOLS ONLY    [DONE 2026-09-02]
     identity guard (agent/tools.py) refuses user_id and its cousins before
     execution, because a model can invent a key that was never offered.
 
-TASK 3 - MEDIUM-RISK TOOLS
+TASK 3 - MEDIUM-RISK TOOLS    [DONE 2026-09-02]
     Add add_to_cart and remove_from_cart. These execute, then surface as an
     informational event - not a blocking prompt.
     MUST PROVE: an over-stock 409 is handled by retrying with the available
     number rather than repeating the same request. The API returns that
     number for exactly this purpose.
+
+    Proved, against production: an add for 57 with 17 in stock came back as
+    a tool result carrying "409: Only 17 available; cart would hold 57",
+    and the retry for 17 succeeded.
+
+    The two tools were the easy half. The real work was that the loop had
+    no error handling at all, so a 409 killed the turn instead of giving
+    the model the chance the status code exists to provide. Failures now
+    become tool results carrying the storefront's message verbatim; the
+    number is never parsed out, because that message is prose the
+    storefront owns and a parser here would be a second implementation of
+    its rule.
+
+    "Rather than repeating the same request" is enforced, not hoped for:
+    an identical (tool, arguments) call that already failed this turn is
+    refused before it leaves the process. The model stays free to pick any
+    smaller quantity.
+
+    Worth knowing for the eval harness: asked plainly to add more than
+    exists, the model checked inventory FIRST and declined to over-ask at
+    all, so the 409 never fired. Good behaviour, and a reminder that a
+    workflow fixture which assumes the error path will not reliably
+    exercise it - the deterministic proof has to live in the unit tests.
+
+    The informational-event half is deliberately not built. Medium tools
+    already execute without a gate; the event itself needs the schema the
+    storefront freezes in its own Task 1, and inventing that contract early
+    is how the two halves end up disagreeing.
 
 TASK 4 - EVENT EMISSION
     Emit the five events the storefront plan defines. Same schema, same
