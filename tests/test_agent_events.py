@@ -7,6 +7,7 @@
 # rather than surfacing as a broken chat window.
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -258,3 +259,28 @@ async def test_no_bearer_token_or_identity_ever_appears_in_the_stream():
     serialised = json.dumps(state["events"]).lower()
     assert "bearer" not in serialised
     assert "authorization" not in serialised
+
+
+# --- the cross-repository anchor -----------------------------------------
+
+CONTRACT = (
+    Path(__file__).resolve().parent.parent / "contracts" / "assistant-events.v1.json"
+)
+
+
+def test_the_golden_stream_replays_to_the_conversation_it_documents():
+    # The storefront vendors this same file and asserts its TypeScript
+    # parser reaches the same conversation. If either side changes shape,
+    # one of the two tests fails - which is the whole mechanism.
+    fixture = json.loads(CONTRACT.read_text(encoding="utf-8"))
+
+    assert fixture["version"] == SCHEMA_VERSION
+    assert replay(fixture["events"]) == fixture["expected"]
+
+
+def test_the_golden_stream_covers_every_event_type():
+    # A fixture exercising four of five types would let the fifth drift
+    # silently between the repositories.
+    fixture = json.loads(CONTRACT.read_text(encoding="utf-8"))
+
+    assert {event["type"] for event in fixture["events"]} == EVENT_TYPES
