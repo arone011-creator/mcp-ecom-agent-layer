@@ -337,11 +337,6 @@ Workflow pass rate becomes a scorecard gate in the storefront's Task 8.
     * SINGLE-USE APPROVALS HOLD FOR ONE REPLICA ONLY. The spent-nonce set
       is in process memory. Before this scales, it needs a shared store.
 
-    * SIX OF THE NINE TOOLS ARE STILL UNVERIFIED AGAINST PRODUCTION. They
-      pass against mocks. Four bugs on this project were invisible to
-      mocks. Run the Phase 1 sweep with real credentials before trusting
-      them under an agent.
-
     * NO TIMEOUT ON A PAUSED CONVERSATION. Flagged in the design document
       for LangGraph specifically. Task 5 must close it.
 
@@ -350,7 +345,7 @@ Workflow pass rate becomes a scorecard gate in the storefront's Task 8.
       first eval run, not after the first bill.
 
     IN PLAIN TERMS
-    Five known problems carried into this stage. Two are worth watching
+    Four known problems carried into this stage. Two are worth watching
     closely: hidden instructions inside product reviews are still not
     properly solved, and from this point onwards every conversation costs
     real money - so it is measured from day one rather than discovered

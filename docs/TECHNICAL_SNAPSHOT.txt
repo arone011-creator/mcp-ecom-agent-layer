@@ -414,14 +414,11 @@ SHIPPED
     production.
 
 VERIFIED AGAINST PRODUCTION
-    search_products, get_product, check_inventory - and cancel_order refusing
-    both a missing and a forged approval.
-
-VERIFIED AGAINST MOCKS ONLY
-    get_orders, get_order, get_cart, add_to_cart, remove_from_cart, and
-    cancel_order's SUCCESS path. These need a signed-in customer, and no demo
-    credentials were available for the sweep. One run with credentials closes
-    the gap.
+    All nine tools. search_products, get_product and check_inventory were
+    verified first; get_orders, get_order, get_cart, add_to_cart,
+    remove_from_cart and cancel_order's SUCCESS path were closed by a sweep
+    run against a live demo account. cancel_order was also confirmed to
+    refuse both a missing and a forged approval.
 
 KNOWN LIMITS, EACH REAL
 
@@ -440,10 +437,8 @@ KNOWN LIMITS, EACH REAL
     nothing removes it.
 
     IN PLAIN TERMS
-    Most of it is proven against the real, live shop. Six capabilities are
-    proven only against a simulation, because testing them needs a real
-    customer login that was not available - that is a known, written-down
-    gap, not an oversight. The most serious open issue: product reviews are
+    All of it is now proven against the real, live shop, not just a
+    simulation. The most serious open issue left: product reviews are
     written by the public and the AI reads them, so a carefully worded review
     could try to give the AI instructions. That must be solved before this is
     used for real.
