@@ -6,14 +6,17 @@ parameters stay under this project's control. Two nodes and a router:
 
     call_model -> (tool calls? -> execute_tools -> call_model) : END
 
-`model_call` and `execute_tool` are injected rather than imported, because
-what is worth testing here is the loop's own behaviour -- does it execute
-what was asked, feed results back in the shape the API wants, stop when
-the model stops, and refuse an identity argument -- not the model's
-judgement, which is the eval harness's job.
+`model_call`, `execute_tool` and `approve` are injected rather than
+imported, because what is worth testing here is the loop's own behaviour
+-- does it execute what was asked, feed results back in the shape the API
+wants, stop when the model stops, refuse an identity argument, and wait
+for a human before an irreversible action -- not the model's judgement,
+which is the eval harness's job.
 
-Read-only tools only, per M4 Task 2. The cart writes and the cancellation
-arrive with the approval machinery that guards them.
+All nine tools, as of M4 Task 5. A high-risk call interrupts the graph
+and resumes only with a token some human caused to be minted; the turn
+holds ONE MCP session throughout, because that token is bound to the
+session id and a session per call would invalidate it.
 """
 
 import asyncio
@@ -375,11 +378,24 @@ async def session_scoped_executor(token: str, url: str | None = None):
         yield session
 
 
-async def answer(utterance: str, token: str, *, model: str | None = None) -> TurnState:
+async def answer(
+    utterance: str,
+    token: str,
+    *,
+    model: str | None = None,
+    approve: ApprovalCallback | None = None,
+    approval_timeout_seconds: float = 300.0,
+) -> TurnState:
     """The whole thing wired to the real model and the real MCP server.
 
     One session for the turn, because an approval pause happens in the
     middle of one and the token is minted against the session id.
+
+    `approve` is how a human answers. It is supplied by the caller -- the
+    storefront's bridge route, which is already holding the connection it
+    streams events over -- and never constructed here: an agent that
+    could produce its own approvals would make the whole gate decoration.
+    Omitting it means every high-risk call is refused.
     """
     tools = await list_openai_tools(token, only=AGENT_TOOLS)
 
@@ -389,6 +405,8 @@ async def answer(utterance: str, token: str, *, model: str | None = None) -> Tur
             model_call=openai_model_call(model),
             execute_tool=session.execute,
             tools=tools,
+            approve=approve,
+            approval_timeout_seconds=approval_timeout_seconds,
         )
 
     # The id the storefront must mint against. Server-side only: it is

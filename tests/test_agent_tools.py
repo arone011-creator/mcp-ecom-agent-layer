@@ -204,20 +204,34 @@ def test_the_medium_risk_surface_is_the_two_cart_writes():
     assert MEDIUM_RISK_TOOLS == {"add_to_cart", "remove_from_cart"}
 
 
-def test_the_agent_surface_is_read_only_plus_medium_but_not_cancel():
-    # cancel_order is High risk and needs the approval machinery that
-    # arrives in Task 5. Until then the agent is not offered it at all.
-    from agent.tools import AGENT_TOOLS
+def test_the_agent_is_now_offered_the_whole_surface():
+    # cancel_order was withheld through Tasks 2-4 because there was no
+    # pause to guard it. The pause exists now (M4 Task 5), so the tool is
+    # reachable -- and the MCP server validates the approval independently
+    # of anything decided on this side.
+    from agent.tools import AGENT_TOOLS, HIGH_RISK_TOOLS
 
-    assert AGENT_TOOLS == READ_ONLY_TOOLS | {"add_to_cart", "remove_from_cart"}
-    assert "cancel_order" not in AGENT_TOOLS
-    assert AGENT_TOOLS < KNOWN_TOOLS
+    assert AGENT_TOOLS == KNOWN_TOOLS
+    assert HIGH_RISK_TOOLS == {"cancel_order"}
+    assert HIGH_RISK_TOOLS <= AGENT_TOOLS
 
 
-def test_the_agent_surface_translates_to_eight_tools():
+def test_the_three_tiers_partition_the_surface():
+    # No tool ungoverned, and none in two tiers at once. A tool that
+    # belonged to no tier would execute with whatever the loop happens to
+    # do by default, which is exactly the accident worth preventing.
+    from agent.tools import HIGH_RISK_TOOLS, MEDIUM_RISK_TOOLS
+
+    assert READ_ONLY_TOOLS | MEDIUM_RISK_TOOLS | HIGH_RISK_TOOLS == KNOWN_TOOLS
+    assert not READ_ONLY_TOOLS & MEDIUM_RISK_TOOLS
+    assert not MEDIUM_RISK_TOOLS & HIGH_RISK_TOOLS
+    assert not READ_ONLY_TOOLS & HIGH_RISK_TOOLS
+
+
+def test_the_agent_surface_translates_to_all_nine_tools():
     from agent.tools import AGENT_TOOLS
 
     translated = translate_tools(all_nine(), only=AGENT_TOOLS)
 
-    assert len(translated) == 8
-    assert "cancel_order" not in {t["function"]["name"] for t in translated}
+    assert len(translated) == 9
+    assert "cancel_order" in {t["function"]["name"] for t in translated}

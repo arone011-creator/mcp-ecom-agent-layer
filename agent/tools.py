@@ -71,10 +71,12 @@ MEDIUM_RISK_TOOLS = frozenset({"add_to_cart", "remove_from_cart"})
 # arguments). The agent's pause is the UX; that validation is the boundary.
 HIGH_RISK_TOOLS = frozenset({"cancel_order"})
 
-# What the agent is offered today. cancel_order is deliberately absent:
-# it is High risk and only becomes reachable with the approval machinery
-# in Task 5. A tool the agent is never shown is one it cannot call.
-AGENT_TOOLS = READ_ONLY_TOOLS | MEDIUM_RISK_TOOLS
+# What the agent is offered. cancel_order was withheld through Tasks 2-4
+# -- a tool the agent is never shown is one it cannot call, and there was
+# no pause to guard it. The pause exists now, so the tool is reachable.
+# Reachable is not the same as unguarded: the agent stopping is the UX,
+# and the MCP server's approval check is the boundary underneath it.
+AGENT_TOOLS = READ_ONLY_TOOLS | MEDIUM_RISK_TOOLS | HIGH_RISK_TOOLS
 
 
 # Identity is never an argument. It is resolved from the bearer token by
