@@ -54,7 +54,11 @@ CONTENTS
 1. DECISIONS THAT MUST BE MADE FIRST
 ================================================================================
 
-(A) WHICH HARNESS RUNS THE LOOP?
+(A) WHICH HARNESS RUNS THE LOOP?    [SETTLED: LangGraph, on OpenAI]
+
+    Settled 2026-09-02: LangGraph, with the OpenAI SDK called directly
+    from a plain node. The options below are kept for the reasoning; note
+    that options 2 and 3 named Anthropic surfaces and no longer apply.
 
     Phase 3 intends LangGraph, for its interrupt-and-resume model. Phase 2
     needs one agent. Three options:
@@ -80,7 +84,7 @@ CONTENTS
 (B) HOW DOES THE AGENT LEARN THE TOOLS?
 
     The MCP server advertises nine tools with schemas. Those must become
-    Claude tool definitions. Read them at startup, or on every session?
+    OpenAI tool definitions. Read them at startup, or on every session?
 
     RECOMMENDED: at startup, with the count asserted. A tool surface that
     silently shrinks is how a capability disappears without anyone noticing
@@ -157,33 +161,37 @@ receives.
 3. THE MODEL, AND THE SETTINGS THAT MATTER
 ================================================================================
 
-    Model            claude-opus-5
-    Thinking         adaptive - {"type": "adaptive"}. It is on by default
-                     on this model; do not disable it. If cost needs
-                     trimming, lower effort instead.
-    Effort           output_config: {"effort": "high"} to begin. Measure
-                     before changing it; "high" is often the sweet spot.
-    Streaming        Required for anything with a long output, and the chat
-                     UI wants tokens as they arrive.
-    max_tokens       Generous. A truncated turn costs a retry.
+    Provider         OpenAI. Chosen 2026-09-02 because this project has
+                     OpenAI credits and no Anthropic key. LangGraph was
+                     picked partly for not being tied to one vendor, and
+                     the MCP server, the nine tools, the approval
+                     architecture and the risk tiers are all unchanged by
+                     the switch.
+    Model            gpt-4.1, via OPENAI_MODEL. One line to change.
+    API              Chat Completions. The tool loop is the well-trodden
+                     path there, and the SDK is called directly from a
+                     LangGraph node rather than through a model-wrapper
+                     library, so request parameters stay ours.
+    Streaming        Not yet. The chat UI will want tokens as they arrive;
+                     add it when the storefront's event stream exists.
+    max_completion_tokens
+                     Generous. A truncated turn costs a retry. Note the
+                     parameter name: max_tokens is the older spelling.
 
-FIVE API FACTS WORTH PINNING DOWN NOW, because a stale assumption here is
-expensive later:
+FOUR API FACTS, EACH VERIFIED BY A LIVE gpt-4.1 CALL ON 2026-09-02 rather
+than recalled:
 
-  * budget_tokens IS REJECTED on this model. The fixed thinking-budget idea
-    is gone; adaptive thinking plus effort replaces it.
-  * ASSISTANT PREFILL IS REJECTED. Shape output with structured outputs or
-    the system prompt, not by pre-writing the reply.
-  * PARSE TOOL INPUTS AS JSON. Never string-match the serialised input;
-    escaping varies.
-  * RETURN ALL tool_result BLOCKS IN ONE user MESSAGE. Splitting them
-    across messages silently teaches the model to stop calling tools in
-    parallel.
-  * ALWAYS CHECK stop_reason BEFORE READING CONTENT. A safety refusal
-    arrives as a normal 200 response.
+  * PARSE TOOL ARGUMENTS AS JSON. tool_calls[i].function.arguments is a
+    STRING, not a dict, and the escaping varies. Never string-match it.
+  * THE MCP SCHEMA PASSES THROUGH UNCHANGED as function.parameters,
+    anyOf/default and all. Translation is a re-nesting, not a rewrite.
+  * finish_reason == "tool_calls" IS THE LOOP SIGNAL, and message.content
+    is None on that turn. Check the reason before reading content.
+  * ONE tool MESSAGE PER CALL, each keyed by tool_call_id, appended after
+    the assistant turn that requested them.
 
-Verify these against the SDK at implementation time rather than trusting
-this list - that is the habit that has paid off twice already.
+Verify against the SDK at implementation time rather than trusting this
+list - that habit has now paid off three times.
 
     IN PLAIN TERMS
     Which AI model to use and how to configure it. Several settings that
@@ -199,25 +207,46 @@ Each task ends in a commit and stops for review. Every behaviour that
 matters gets a test that has been seen to fail - the approval tests in
 Phase 1 were verified that way and it is why they can be trusted.
 
-TASK 0 - PROBE THE HARNESS BEFORE BUILDING ON IT
-    Install the chosen framework and the Anthropic SDK. Confirm, by running
+TASK 0 - PROBE THE HARNESS BEFORE BUILDING ON IT    [DONE 2026-09-02]
+    Install the chosen framework and the model SDK. Confirm, by running
     code: how tools are declared, how a pause-for-approval is expressed and
     resumed, and whether tool definitions can be built at runtime from MCP's
     advertised schemas.
     MUST PROVE: every framework call this plan assumes actually exists.
     Phase 1's equivalent probe caught a wrong API five tasks early.
 
-TASK 1 - MCP CLIENT AND TOOL TRANSLATION
+    Done as part of Tasks 1 and 2 rather than as a separate step: LangGraph
+    and the OpenAI SDK were both exercised by running code before either
+    plan was written. See docs/superpowers/plans/
+    2026-09-02-m4-task2-agent-loop-openai.md for what each probe returned,
+    including the interrupt/resume primitives Task 5 will need.
+
+TASK 1 - MCP CLIENT AND TOOL TRANSLATION    [DONE 2026-09-02]
     Connect to the MCP server, list its tools, translate the schemas into
-    Claude tool definitions.
+    OpenAI tool definitions.
     MUST PROVE: exactly nine tools translate; an unknown tool is refused
     rather than passed through; the bearer token travels on every call.
 
-TASK 2 - THE LOOP, READ-ONLY TOOLS ONLY
+    All three proved, in agent/tools.py and tests/test_agent_tools.py, and
+    verified against the live server. One thing the probe found and the
+    plan did not anticipate: cancel_order advertises approval_token as a
+    model-fillable field. It is stripped before the model sees it - the
+    storefront mints that token after a human clicks, and a field the model
+    cannot see is a field it cannot invent.
+
+TASK 2 - THE LOOP, READ-ONLY TOOLS ONLY    [DONE 2026-09-02]
     A single turn: utterance in, tool calls out, answer back. Wire only the
     six low-risk tools.
     MUST PROVE: workflow 1, "what did I order recently", end to end against
     the live MCP server; and that no user id is ever sent as an argument.
+
+    Both proved. agent/loop.py is two nodes and a router on LangGraph, with
+    the model and the tool executor injected so the loop's own behaviour is
+    what the tests exercise. Workflow 1 ran live: the agent called
+    get_orders with schema arguments only and answered with the demo
+    account's real orders, at totals it could not have invented. The
+    identity guard (agent/tools.py) refuses user_id and its cousins before
+    execution, because a model can invent a key that was never offered.
 
 TASK 3 - MEDIUM-RISK TOOLS
     Add add_to_cart and remove_from_cart. These execute, then surface as an
