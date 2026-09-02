@@ -80,6 +80,36 @@ def test_product_reads_the_api_camel_case_names():
     assert product.images[0].alt_text == "A"
 
 
+def test_product_description_is_marked_as_untrusted_content():
+    product = ProductSummary.model_validate(
+        {"id": "p1", "name": "R", "slug": "r", "price": "1.00", "description": "Nice shoes."}
+    )
+
+    assert product.description == "<untrusted-user-content>Nice shoes.</untrusted-user-content>"
+
+
+def test_a_missing_description_is_not_wrapped():
+    product = ProductSummary.model_validate(
+        {"id": "p1", "name": "R", "slug": "r", "price": "1.00"}
+    )
+
+    assert product.description is None
+
+
+def test_a_bidi_override_in_a_description_does_not_survive_parsing():
+    product = ProductSummary.model_validate(
+        {
+            "id": "p1",
+            "name": "R",
+            "slug": "r",
+            "price": "1.00",
+            "description": "safe\u202edesc",
+        }
+    )
+
+    assert "\u202e" not in product.description
+
+
 def test_search_result_carries_pagination():
     result = ProductSearchResult.model_validate(
         {

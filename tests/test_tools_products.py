@@ -119,7 +119,7 @@ async def test_get_product_returns_the_detail_shape():
     found = await products.get_product(api(), product_id="p1")
 
     assert found.compare_price == "39.99"
-    assert found.description == "Fast"
+    assert found.description == "<untrusted-user-content>Fast</untrusted-user-content>"
 
 
 @respx.mock

@@ -18,7 +18,9 @@ before this service knows about it, and failing hard there would take
 every tool down for an additive change.
 """
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from untrusted_content import mark_untrusted
 
 
 class Base(BaseModel):
@@ -56,6 +58,15 @@ class ProductSummary(Base):
     images: list[ImageView] = Field(default_factory=list)
     created_at: str | None = Field(default=None, alias="createdAt")
     updated_at: str | None = Field(default=None, alias="updatedAt")
+
+    # Free text an admin (and, once review creation ships, a customer)
+    # authored, flowing straight into an agent's context. Marked once here
+    # so search_products, get_product, and cart views -- which all resolve
+    # to this model -- never have to remember to do it themselves.
+    @field_validator("description")
+    @classmethod
+    def _mark_description_untrusted(cls, value: str | None) -> str | None:
+        return mark_untrusted(value)
 
 
 class Pagination(Base):
