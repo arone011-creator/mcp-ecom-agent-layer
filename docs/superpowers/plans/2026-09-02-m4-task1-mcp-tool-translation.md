@@ -24,6 +24,23 @@ the error rather than researching ahead of the failure. `ToolParam` is a
 TypedDict, so it is a plain `dict` at runtime either way and the assertions
 hold regardless.
 
+**Executed 2026-09-02. Outcome:**
+
+- The flagged uncertainty resolved in our favour: `from anthropic.types
+  import ToolParam` is correct. `anthropic 1.3.0` installed (it brings
+  `httpx2` alongside the existing `httpx`; both coexist, existing suite
+  unaffected).
+- One environment deviation: this venv's `pip.exe` shim is broken (exits 1,
+  prints nothing, including for `pip --version`). `.venv/Scripts/python -m
+  pip` works normally and was used instead. Unrelated to this task, but
+  worth knowing before the next install.
+- All 11 tests green; full suite 129 passed (118 + 11, as predicted).
+- Live gate passed: 9 tools translated from production, `cancel_order`
+  advertising `order_id` only.
+- The known `test_the_token_does_not_leak_what_it_authorises` flake fired
+  once mid-task and passed 3/3 on rerun — still unrelated, still tracked
+  separately.
+
 ---
 
 ## File Structure
@@ -50,7 +67,7 @@ hold regardless.
 - Modify: `requirements.txt`
 - Modify: `config.py`
 
-- [ ] **Step 1: Add `anthropic` to `requirements.txt`**
+- [x] **Step 1: Add `anthropic` to `requirements.txt`**
 
 Find:
 ```
@@ -67,7 +84,7 @@ httpx>=0.27,<0.29
 pydantic>=2.7,<3
 ```
 
-- [ ] **Step 2: Install it**
+- [x] **Step 2: Install it**
 
 Run: `.venv/Scripts/pip install -r requirements-dev.txt`
 Expected: `anthropic` installs. Confirm with
@@ -75,7 +92,7 @@ Expected: `anthropic` installs. Confirm with
 
 If a 1.x does not exist yet and pip resolves nothing, pin whatever major version pip does offer and note the deviation; do not silently widen the range.
 
-- [ ] **Step 3: Add `MCP_SERVER_URL` to `config.py`, and fix the stale comment**
+- [x] **Step 3: Add `MCP_SERVER_URL` to `config.py`, and fix the stale comment**
 
 Find:
 ```python
@@ -102,7 +119,7 @@ MCP_SERVER_URL = os.environ.get(
 )
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add requirements.txt config.py
@@ -123,7 +140,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Create: `tests/test_agent_tools.py`
 - Create: `agent/__init__.py`, `agent/tools.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_agent_tools.py`:
 
@@ -267,12 +284,12 @@ def test_a_blank_token_is_refused_rather_than_sent_empty():
         build_transport("https://mcp.test/mcp", "")
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_agent_tools.py -v`
 Expected: collection error — `ModuleNotFoundError: No module named 'agent'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `agent/__init__.py` (empty file).
 
@@ -406,17 +423,17 @@ async def list_claude_tools(token: str, url: str | None = None) -> list[ToolPara
         return translate_tools(await client.list_tools())
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_agent_tools.py -v`
 Expected: 11 passed.
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `.venv/Scripts/python -m pytest -q`
 Expected: all green (118 existing + 11 new = 129). If `test_the_token_does_not_leak_what_it_authorises` fails, that is the known pre-existing flake — re-run once to confirm, it is unrelated.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add agent/ tests/test_agent_tools.py
@@ -437,7 +454,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Files:** none modified — this is the real gate, matching how every M3 claim was verified.
 
-- [ ] **Step 1: Translate the production tool surface**
+- [x] **Step 1: Translate the production tool surface**
 
 Run:
 ```bash
@@ -453,7 +470,7 @@ for t in tools:
 
 Expected: `9 tools`, and `cancel_order` listing `['order_id']` only — no `approval_token`.
 
-- [ ] **Step 2: If the count or the surface differs, stop**
+- [x] **Step 2: If the count or the surface differs, stop**
 
 A mismatch means the deployed MCP server is not the one this agent was built against. Report it; do not widen `KNOWN_TOOLS` to make the check pass — that check exists precisely to catch this.
 
