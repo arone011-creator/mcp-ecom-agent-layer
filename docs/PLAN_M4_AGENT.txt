@@ -330,7 +330,7 @@ TASK 4 - EVENT EMISSION    [DONE 2026-09-02]
     spins forever, at exactly the moment a customer is watching. It now
     emits a completion carrying the refusal.
 
-TASK 5 - THE APPROVAL PAUSE
+TASK 5 - THE APPROVAL PAUSE    [DONE 2026-09-02, one gate outstanding]
     On a high-risk tool: emit approval_required with STRUCTURED arguments,
     stop, and resume when a token arrives.
     MUST PROVE, and this is the milestone's most important test:
@@ -341,6 +341,59 @@ TASK 5 - THE APPROVAL PAUSE
       * a token that never arrives times out cleanly rather than leaving a
         thread paused forever. LangGraph has no built-in timeout, and the
         design document already flags this.
+
+    ALL FOUR PROVED IN TESTS. Two also proved live against production on
+    gpt-4.1, with a callback standing in for the storefront's approve
+    route:
+
+      declined  approval_required emitted with structured arguments;
+                nothing sent; order untouched; no approval minted.
+      expired   same, distinguished in the message the customer sees --
+                "nobody answered" and "you said no" are different facts.
+
+    "The agent never calls /approvals" is asserted STRUCTURALLY, not
+    behaviourally: a test scans the agent package for any reference to
+    the route or the minting module. A behavioural test only proves the
+    agent did not mint on that particular run.
+
+    OUTSTANDING, and it is the most important one: an approved run has
+    never been executed live. The demo account has no cancellable order
+    left -- all three were cancelled during Phase 1 verification -- and
+    the decision was to record the gap rather than manufacture a fixture
+    row that bypasses the storefront's own checkout logic. To close it:
+    place a demo order through the storefront (no payment is taken), then
+    run the approve mode of the live gate and cross-check the status in
+    the browser. Until then, the path where a real cancellation goes
+    through on a real token is unit-tested only.
+
+    THE FINDING THAT SHAPED THE TASK. An approval token is bound to the
+    mcp-session-id, and the executor opened a NEW session per call --
+    probed against production, two sequential calls returned two
+    different ids. A token minted for the call that paused would have
+    been rejected by the call that resumed, with "belongs to another
+    session", while every unit test passed, because the pure functions
+    were never the problem. The turn now holds ONE session across the
+    pause. That is the third session-identity bug on this project, after
+    the include_all header and the sweep script's fake session id; it now
+    has a test of its own.
+
+    Two consequences worth carrying forward:
+      * the deadline is not politeness. A paused turn holds a live MCP
+        session, so a pause nobody answers leaks a server-side session
+        and not merely a Python task.
+      * InMemorySaver and the held session both assume one process. Same
+        limitation approvals.py already documents for its spent-nonce
+        set. A second replica needs a shared checkpointer.
+
+    ONE CORRECTNESS POINT that is easy to get wrong. LangGraph re-runs a
+    node from the top when a thread resumes, so a side effect placed
+    before the interrupt happens TWICE. Every approval is therefore
+    collected before any tool executes, and a test asserts nothing had
+    run at the moment the human was asked.
+
+    cancel_order is now offered to the model. It was withheld through
+    Tasks 2-4 on the grounds that a tool the agent is never shown is one
+    it cannot call - which was a stand-in for a guard, not a guard.
 
 TASK 6 - PROMPT INJECTION, SECOND PASS
     Product descriptions already arrive from the MCP server wrapped in

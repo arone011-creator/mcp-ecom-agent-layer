@@ -123,6 +123,28 @@ Streaming transport. These events accumulate in turn state; delivering them over
 they occur is the bridge route's job (storefront Task 3) against an agent HTTP surface that
 does not exist yet (agent Task 8).
 
-`approval_required` is defined, fixtured, and replayable, but nothing emits it yet — the
-agent is not offered a high-risk tool at all until the approval machinery lands in agent
-Task 5. Freezing the shape now is what leaves that task nothing to invent.
+`approval_required` **is** emitted, as of agent Task 5, and proved live.
+
+## Where the session id lives, and why it is not in the event
+
+The storefront mints an approval by calling the MCP server's `POST /approvals` with the id
+of the session the resumed call will actually ride. A token minted against any other session
+is rejected — the binding is deliberate, and it is what stops an approval crossing
+conversations.
+
+That id is **not** in the `approval_required` event. It travels one layer below, as a field
+on the argument the agent hands its `approve` callback — the server-side seam the bridge
+route already sits on. The event reaches a browser; the session id has no business being
+there, and the frozen contract above stays unchanged because of it.
+
+The callback's argument is therefore:
+
+```json
+{"call_id": "call_3", "tool": "cancel_order", "arguments": {"order_id": "ord_9"},
+ "session_id": "3be90c18607f4441a8cde0b706182628"}
+```
+
+and its answer is `{"approved": true, "token": "..."}`, `{"approved": false}`, or — when a
+deadline passes rather than a person deciding — `{"approved": false, "reason": "expired"}`.
+The UI should say which of the last two happened: "nobody answered" and "you said no" are
+different facts about the same unchanged order.
