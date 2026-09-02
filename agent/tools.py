@@ -66,6 +66,11 @@ READ_ONLY_TOOLS = frozenset(
 # removed -- and the API scopes both to the caller's own cart.
 MEDIUM_RISK_TOOLS = frozenset({"add_to_cart", "remove_from_cart"})
 
+# High risk: irreversible from the customer's point of view, and gated by
+# an approval token the MCP server validates against (session, tool,
+# arguments). The agent's pause is the UX; that validation is the boundary.
+HIGH_RISK_TOOLS = frozenset({"cancel_order"})
+
 # What the agent is offered today. cancel_order is deliberately absent:
 # it is High risk and only becomes reachable with the approval machinery
 # in Task 5. A tool the agent is never shown is one it cannot call.

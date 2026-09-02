@@ -16,19 +16,25 @@ Read-only tools only, per M4 Task 2. The cart writes and the cancellation
 arrive with the approval machinery that guards them.
 """
 
+import asyncio
 import json
 import operator
+import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Awaitable, Callable, TypedDict
 
 from fastmcp.exceptions import ToolError
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 import config
+from agent.events import approval_required as approval_required_event
 from agent.events import message as message_event
 from agent.events import tool_completed, tool_started
 from agent.tools import (
     AGENT_TOOLS,
+    HIGH_RISK_TOOLS,
     build_transport,
     list_openai_tools,
     reject_forbidden_arguments,
@@ -36,6 +42,9 @@ from agent.tools import (
 
 ModelCall = Callable[[list[dict], list[dict]], Awaitable[Any]]
 ToolExecutor = Callable[[str, dict], Awaitable[Any]]
+# Takes the interrupt payload (call_id, tool, arguments) and answers
+# {"approved": bool, "token": str | None, "reason": str | None}.
+ApprovalCallback = Callable[[dict], Awaitable[dict]]
 
 
 class TurnState(TypedDict, total=False):
@@ -60,6 +69,27 @@ def _signature(name: str, arguments: dict) -> str:
     return json.dumps({"tool": name, "args": arguments}, sort_keys=True)
 
 
+async def _decide(
+    approve: ApprovalCallback, requests: list[dict], timeout_seconds: float
+) -> list[dict]:
+    """Ask a human, under a deadline.
+
+    LangGraph has no timeout of its own, and the design document flags
+    that. It matters more here than it would elsewhere: the turn is
+    holding an MCP session open while it waits, so a pause nobody answers
+    leaks a server-side session and not merely a Python task.
+
+    A deadline that passes is a refusal, never a grant.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.gather(*(approve(request) for request in requests)),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        return [{"approved": False, "reason": "expired"} for _ in requests]
+
+
 def _next_seq(state: TurnState) -> int:
     """The next sequence number, derived from what has already been emitted.
 
@@ -82,8 +112,15 @@ def _tool_message(call_id: str, payload) -> dict:
 def build_graph(
     model_call: ModelCall | None = None,
     execute_tool: ToolExecutor | None = None,
+    checkpointer=None,
 ):
-    """The turn as a graph. Compiles without a checkpointer: nothing pauses."""
+    """The turn as a graph.
+
+    A checkpointer is required for the approval pause -- interrupt()
+    writes the paused state through it. InMemorySaver is honest about the
+    current deployment (one replica, one process), and is the same
+    limitation approvals.py already documents for its spent-nonce set.
+    """
 
     async def call_model(state: TurnState) -> dict:
         message = await model_call(state["messages"], state.get("tools", []))
@@ -99,15 +136,7 @@ def build_graph(
         return {"messages": [dumped], "answer": message.content, "events": events}
 
     async def execute_tools(state: TurnState) -> dict:
-        results = []
-        events = []
-        newly_failed = []
-        already_failed = set(state.get("failed", []))
-        # This node emits several events; each needs its own number, and
-        # they cannot come from _next_seq because state does not change
-        # until the node returns.
-        seq = _next_seq(state)
-
+        parsed = []
         for call in _tool_calls_of(state["messages"][-1]):
             name = call["function"]["name"]
             # Arguments arrive as a JSON string and the escaping varies.
@@ -118,8 +147,59 @@ def build_graph(
             # assert, so this refuses the turn rather than inviting a retry.
             reject_forbidden_arguments(name, arguments)
 
+            # A field code injects is never one the model may pre-fill.
+            arguments.pop("approval_token", None)
+
+            parsed.append((call["id"], name, arguments))
+
+        # This node emits several events; each needs its own number, and
+        # they cannot come from _next_seq because state does not change
+        # until the node returns.
+        seq = _next_seq(state)
+
+        # EVERY interrupt happens before ANY execution. LangGraph re-runs
+        # this node from the top when the thread resumes, so a side effect
+        # placed before the interrupt would happen twice. Collecting the
+        # approvals first makes that re-run free.
+        events = []
+        decisions = {}
+
+        for call_id, name, arguments in parsed:
+            if name not in HIGH_RISK_TOOLS:
+                continue
+
+            events.append(approval_required_event(seq, call_id, name, arguments))
+            seq += 1
+
+            # Pauses the thread on the first pass; returns the resume
+            # value on the second.
+            decisions[call_id] = interrupt(
+                {"call_id": call_id, "tool": name, "arguments": arguments}
+            )
+
+        results = []
+        newly_failed = []
+        already_failed = set(state.get("failed", []))
+
+        for call_id, name, arguments in parsed:
             signature = _signature(name, arguments)
-            call_id = call["id"]
+
+            decision = decisions.get(call_id)
+
+            if decision is not None and not decision.get("approved"):
+                declined = (
+                    "The approval request expired before anyone answered it. "
+                    "Nothing was sent."
+                    if decision.get("reason") == "expired"
+                    else "The customer declined this action. Nothing was sent."
+                )
+                results.append(_tool_message(call_id, {"error": declined}))
+                # No tool_started: it never started. The completion still
+                # fires so the UI resolves the card rather than leaving it
+                # open forever.
+                events.append(tool_completed(seq, call_id, name, error=declined))
+                seq += 1
+                continue
 
             events.append(tool_started(seq, call_id, name, arguments))
             seq += 1
@@ -137,8 +217,15 @@ def build_graph(
                 seq += 1
                 continue
 
+            # Injected here, by code, from the decision a human caused.
+            # The field is stripped from the schema the model is shown, so
+            # this is never a value the model could have produced.
+            sent = dict(arguments)
+            if decision is not None:
+                sent["approval_token"] = decision.get("token")
+
             try:
-                result = await execute_tool(name, arguments)
+                result = await execute_tool(name, sent)
             except ToolError as failure:
                 # Passed through verbatim. The storefront writes these to
                 # be acted on -- a 409 carries the number that IS
@@ -166,7 +253,7 @@ def build_graph(
     graph.add_conditional_edges("model", route, {"tools": "tools", END: END})
     graph.add_edge("tools", "model")
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 async def run_turn(
@@ -176,11 +263,23 @@ async def run_turn(
     execute_tool: ToolExecutor,
     tools: list[dict] | None = None,
     max_steps: int = 25,
+    approve: ApprovalCallback | None = None,
+    approval_timeout_seconds: float = 300.0,
 ) -> TurnState:
-    """One turn, start to finish."""
-    app = build_graph(model_call, execute_tool)
+    """One turn, start to finish, pausing for approval where required."""
+    app = build_graph(model_call, execute_tool, checkpointer=InMemorySaver())
 
-    return await app.ainvoke(
+    settings = {
+        # A confused agent stops rather than looping. The repeat guard
+        # already blocks the obvious case; this bounds the rest, and is
+        # the first half of the cost ceiling Decision D calls for.
+        "recursion_limit": max_steps,
+        # One thread per turn. Nothing outlives a turn today; Phase 3 is
+        # where a thread becomes a conversation.
+        "configurable": {"thread_id": uuid.uuid4().hex},
+    }
+
+    state = await app.ainvoke(
         {
             "messages": [{"role": "user", "content": utterance}],
             "tools": tools or [],
@@ -188,11 +287,25 @@ async def run_turn(
             "failed": [],
             "events": [],
         },
-        # A confused agent stops rather than looping. The repeat guard
-        # already blocks the obvious case; this bounds the rest, and is
-        # the first half of the cost ceiling Decision D calls for.
-        config={"recursion_limit": max_steps},
+        config=settings,
     )
+
+    while state.get("__interrupt__"):
+        requests = [item.value for item in state["__interrupt__"]]
+
+        if approve is None:
+            # The safe default. A turn with no way to reach a human must
+            # not proceed as though one had answered.
+            decisions = [{"approved": False} for _ in requests]
+        else:
+            decisions = await _decide(approve, requests, approval_timeout_seconds)
+
+        state = await app.ainvoke(
+            Command(resume=decisions[0] if len(decisions) == 1 else decisions),
+            config=settings,
+        )
+
+    return state
 
 
 def openai_model_call(model: str | None = None) -> ModelCall:

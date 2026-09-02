@@ -5,8 +5,16 @@
 # part about it being safe.
 
 import asyncio
+import json
 
-from agent.loop import session_scoped_executor
+from agent.events import replay
+from agent.loop import run_turn, session_scoped_executor
+from tests.test_agent_loop import (
+    FakeMessage,
+    FakeToolCall,
+    recording_executor,
+    scripted_model,
+)
 
 
 class FakeTransport:
@@ -59,3 +67,109 @@ async def test_one_session_serves_every_call_in_a_turn(monkeypatch):
     assert FakeClient.opened == 1
     assert session.session_id == "session-abc"
     assert [name for name, _ in client.calls] == ["get_cart", "get_orders"]
+
+
+# --- the pause -----------------------------------------------------------
+
+
+def cancel_turn(order_id="ord_9"):
+    """A model that asks to cancel, then acknowledges. Used by several tests."""
+    return scripted_model(
+        FakeMessage(
+            tool_calls=[
+                FakeToolCall("call_1", "cancel_order", '{"order_id":"%s"}' % order_id)
+            ]
+        ),
+        FakeMessage(content="Cancelled."),
+    )
+
+
+async def declining(request):
+    return {"approved": False}
+
+
+async def test_a_high_risk_call_stops_before_anything_is_sent():
+    # The MUST PROVE, first half. Refusing sends nothing to the MCP server.
+    executor = recording_executor({})
+    asked = []
+
+    async def decline(request):
+        asked.append(request)
+        return {"approved": False}
+
+    state = await run_turn(
+        "cancel my most recent order",
+        model_call=cancel_turn(),
+        execute_tool=executor,
+        approve=decline,
+    )
+
+    assert executor.calls == []
+    assert asked[0]["tool"] == "cancel_order"
+    assert asked[0]["arguments"] == {"order_id": "ord_9"}
+    assert state["answer"] == "Cancelled."
+
+
+async def test_the_pause_emits_an_approval_required_event_with_structured_arguments():
+    # The approval card is rendered from these. Prose would let an injected
+    # review write the words next to the confirm button.
+    state = await run_turn(
+        "cancel my most recent order",
+        model_call=cancel_turn(),
+        execute_tool=recording_executor({}),
+        approve=declining,
+    )
+
+    required = [e for e in state["events"] if e["type"] == "approval_required"]
+    assert len(required) == 1
+    assert required[0]["data"]["tool"] == "cancel_order"
+    assert required[0]["data"]["arguments"] == {"order_id": "ord_9"}
+    # Frozen in Task 4: the agent never mints, so it never names a token.
+    assert "token" not in json.dumps(required[0])
+
+
+async def test_a_declined_call_resolves_rather_than_hanging():
+    state = await run_turn(
+        "cancel my most recent order",
+        model_call=cancel_turn(),
+        execute_tool=recording_executor({}),
+        approve=declining,
+    )
+
+    conversation = replay(state["events"])
+    tool = conversation["tools"][0]
+
+    assert tool["ok"] is False
+    assert "declin" in tool["error"].lower()
+    assert conversation["gaps"] == []
+
+
+async def test_low_risk_calls_in_the_same_batch_do_not_run_before_the_pause():
+    # LangGraph re-runs a node on resume. Anything executed before the
+    # interrupt would execute twice; nothing runs before it, so it cannot.
+    executor = recording_executor({})
+    seen = []
+
+    async def decline(request):
+        seen.append(list(executor.calls))
+        return {"approved": False}
+
+    await run_turn(
+        "check then cancel",
+        model_call=scripted_model(
+            FakeMessage(
+                tool_calls=[
+                    FakeToolCall("call_1", "get_order", '{"order_id":"ord_9"}'),
+                    FakeToolCall("call_2", "cancel_order", '{"order_id":"ord_9"}'),
+                ]
+            ),
+            FakeMessage(content="done"),
+        ),
+        execute_tool=executor,
+        approve=decline,
+    )
+
+    # Nothing had run at the moment the human was asked.
+    assert seen[0] == []
+    # And the read still ran exactly once afterwards.
+    assert [name for name, _ in executor.calls] == ["get_order"]
