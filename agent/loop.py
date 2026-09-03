@@ -94,6 +94,25 @@ async def _decide(
         return [{"approved": False, "reason": "expired"} for _ in requests]
 
 
+def _publish(on_event, state: TurnState, already: int) -> int:
+    """Hand the caller every event appended since it was last called.
+
+    Driven by the accumulated length rather than by the nodes, which
+    cannot see the caller. Not real-time inside a single graph step --
+    ainvoke returns when the step does -- but it delivers each batch as
+    the graph produces it, and crucially it delivers the
+    approval_required BEFORE the turn blocks on a human, which is the
+    moment that matters.
+    """
+    events = state.get("events", [])
+
+    if on_event is not None:
+        for event in events[already:]:
+            on_event(event)
+
+    return len(events)
+
+
 def _next_seq(state: TurnState) -> int:
     """The next sequence number, derived from what has already been emitted.
 
@@ -279,6 +298,7 @@ async def run_turn(
     approve: ApprovalCallback | None = None,
     approval_timeout_seconds: float = 300.0,
     session_id: str | None = None,
+    on_event=None,
 ) -> TurnState:
     """One turn, start to finish, pausing for approval where required.
 
@@ -286,8 +306,15 @@ async def run_turn(
     passed to `approve` because a token is only valid on the session it
     was minted against, and it travels there -- a server-side callback
     argument -- rather than in the event stream, which reaches a browser.
+
+    `on_event` receives each event as the graph appends it. Optional: the
+    tests and the eval harness read the accumulated state instead. The
+    HTTP surface needs them live, because a stream that only arrives once
+    the turn is over is not a stream, and the pause in the middle is
+    exactly when a customer most needs to see something.
     """
     app = build_graph(model_call, execute_tool, checkpointer=InMemorySaver())
+    published = 0
 
     settings = {
         # A confused agent stops rather than looping. The repeat guard
@@ -312,6 +339,7 @@ async def run_turn(
         },
         config=settings,
     )
+    published = _publish(on_event, state, published)
 
     while state.get("__interrupt__"):
         requests = [
@@ -329,6 +357,7 @@ async def run_turn(
             Command(resume=decisions[0] if len(decisions) == 1 else decisions),
             config=settings,
         )
+        published = _publish(on_event, state, published)
 
     return state
 

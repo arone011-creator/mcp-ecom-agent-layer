@@ -31,5 +31,21 @@ OPENAI_TIMEOUT_SECONDS = float(os.environ.get("OPENAI_TIMEOUT_SECONDS", "60"))
 APPROVAL_SECRET = os.environ.get("MCP_APPROVAL_SECRET", "")
 
 APPROVAL_TTL_SECONDS = int(os.environ.get("MCP_APPROVAL_TTL_SECONDS", "300"))
+
+# Guards the agent service's /turn route. Deliberately NOT the approval
+# secret: this one says "you may spend model tokens", that one says "this
+# action was confirmed by a human", and an endpoint that calls a paid
+# model with no key at all is a bill anyone who finds the URL can run up.
+AGENT_SERVICE_KEY = os.environ.get("AGENT_SERVICE_KEY", "")
+
+# How long a turn holds an approval open. Longer than a person needs to
+# read a card and click, short enough that an abandoned tab does not hold
+# an MCP session all afternoon.
+APPROVAL_WAIT_SECONDS = float(os.environ.get("AGENT_APPROVAL_WAIT_SECONDS", "300"))
+
+# Set by Railway on every deploy. Reported by /health so a readiness check
+# can assert it reached the container it just built, rather than the one
+# being replaced -- a mistake made twice on this project.
+RAILWAY_GIT_COMMIT_SHA = os.environ.get("RAILWAY_GIT_COMMIT_SHA", "")
 HTTP_TIMEOUT_SECONDS = float(os.environ.get("MCP_HTTP_TIMEOUT_SECONDS", "10"))
 PORT = int(os.environ.get("PORT", "8000"))
