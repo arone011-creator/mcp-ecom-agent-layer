@@ -17,7 +17,7 @@ Two implementations exist, and neither is the source of truth:
 The two halves live in separate git repositories, in different languages, so "define it once
 and import it" cannot mean a shared module. It means a shared *artefact*.
 
-`assistant-events.v1.json` holds a recorded stream covering all five event types and, beside
+`assistant-events.v1.json` holds a recorded stream covering all six event types and, beside
 it, the `expected` conversation that replaying it must produce. This repository asserts that
 in `tests/test_agent_events.py`; the storefront vendors the same file and asserts the same
 thing about its own parser. Change the shape on either side and a test fails on that side —
