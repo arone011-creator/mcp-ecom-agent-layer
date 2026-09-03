@@ -37,6 +37,7 @@ from starlette.routing import Route
 
 import config
 from agent.events import approval_required as approval_required_event
+from agent.events import message_delta
 from agent.loop import openai_model_call, run_turn, session_scoped_executor
 from agent.tools import AGENT_TOOLS, list_openai_tools
 
@@ -172,6 +173,12 @@ async def _stream_turn(utterance: str, token: str):
     read off the returned state, because a stream that only arrives once
     the turn is over is not a stream -- and the pause in the middle is
     exactly when the customer most needs to see something.
+
+    Three separate things have to be true for that, and for a while only
+    two of them were, which is why the first live turn still arrived in
+    one lump: this queue, run_turn publishing after each graph step
+    rather than at the end, and the model call streaming its prose. Miss
+    any one and the customer waits for the whole answer.
     """
     queue: asyncio.Queue = asyncio.Queue()
     tools = await list_openai_tools(token, only=AGENT_TOOLS)
@@ -199,11 +206,19 @@ async def _stream_turn(utterance: str, token: str):
                 turn_id, timeout=config.APPROVAL_WAIT_SECONDS
             )
 
+        def on_delta(fragment: str) -> None:
+            # Out of band and unnumbered: a rendering hint, not a fact
+            # about the turn. The `message` event that follows carries the
+            # whole answer and stays authoritative, so a reader that
+            # ignores these -- an older storefront, say -- behaves exactly
+            # as it did before fragments existed.
+            queue.put_nowait(message_delta(fragment))
+
         async def drive():
             try:
                 return await run_turn(
                     utterance,
-                    model_call=openai_model_call(),
+                    model_call=openai_model_call(on_delta=on_delta),
                     execute_tool=session.execute,
                     tools=tools,
                     approve=approve,

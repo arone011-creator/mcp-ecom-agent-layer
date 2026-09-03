@@ -1,9 +1,11 @@
 {
   "version": 1,
-  "description": "The canonical assistant event stream. Both repositories replay this file and must reach the identical conversation in `expected`. See contracts/README.md.",
+  "description": "The canonical assistant event stream. Both repositories replay this file and must reach the identical conversation in `expected`. See contracts/README.md. The two message_delta runs below are the interesting case: the first is closed by the message at seq 2 and must NOT appear twice, the second is never closed and must survive as partial text.",
   "events": [
     {"v": 1, "seq": 0, "type": "tool_started", "data": {"call_id": "call_1", "tool": "get_orders", "arguments": {"limit": 3}}},
     {"v": 1, "seq": 1, "type": "tool_completed", "data": {"call_id": "call_1", "tool": "get_orders", "ok": true, "result": [{"orderNumber": "ORD-1042", "status": "PENDING"}]}},
+    {"v": 1, "seq": -1, "type": "message_delta", "data": {"text": "Your most recent order "}},
+    {"v": 1, "seq": -1, "type": "message_delta", "data": {"text": "is ORD-1042, still pending."}},
     {"v": 1, "seq": 2, "type": "message", "data": {"text": "Your most recent order is ORD-1042, still pending."}},
     {"v": 1, "seq": 3, "type": "tool_started", "data": {"call_id": "call_2", "tool": "add_to_cart", "arguments": {"product_id": "p1", "quantity": 57}}},
     {"v": 1, "seq": 4, "type": "tool_completed", "data": {"call_id": "call_2", "tool": "add_to_cart", "ok": false, "error": "Error calling tool 'add_to_cart': 409: Only 17 available; cart would hold 57"}},
@@ -11,10 +13,15 @@
     {"v": 1, "seq": 6, "type": "approval_required", "data": {"call_id": "call_4", "tool": "cancel_order", "arguments": {"order_id": "ord_11"}}},
     {"v": 1, "seq": 7, "type": "tool_started", "data": {"call_id": "call_4", "tool": "cancel_order", "arguments": {"order_id": "ord_11"}}},
     {"v": 1, "seq": 8, "type": "tool_completed", "data": {"call_id": "call_4", "tool": "cancel_order", "ok": true, "result": {"orderId": "ord_11", "status": "CANCELLED"}}},
-    {"v": 1, "seq": 9, "type": "error", "data": {"message": "The assistant could not reach the shop.", "retryable": true}}
+    {"v": 1, "seq": 9, "type": "error", "data": {"message": "The assistant could not reach the shop.", "retryable": true}},
+    {"v": 1, "seq": -1, "type": "message_delta", "data": {"text": "Anything else"}},
+    {"v": 1, "seq": -1, "type": "message_delta", "data": {"text": " I can help with?"}}
   ],
   "expected": {
-    "text": ["Your most recent order is ORD-1042, still pending."],
+    "text": [
+      "Your most recent order is ORD-1042, still pending.",
+      "Anything else I can help with?"
+    ],
     "tools": [
       {"call_id": "call_1", "tool": "get_orders", "arguments": {"limit": 3}, "ok": true, "result": [{"orderNumber": "ORD-1042", "status": "PENDING"}]},
       {"call_id": "call_2", "tool": "add_to_cart", "arguments": {"product_id": "p1", "quantity": 57}, "ok": false, "error": "Error calling tool 'add_to_cart': 409: Only 17 available; cart would hold 57"},

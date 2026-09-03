@@ -6,6 +6,7 @@
 # stop anyone else spending this project's OpenAI credits.
 
 import asyncio
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -75,10 +76,16 @@ async def test_closing_a_turn_forgets_it():
 # --- events must arrive as they happen -----------------------------------
 
 
-async def test_events_are_published_as_the_turn_runs_not_at_the_end():
-    # A stream that only arrives once the turn is over is not a stream,
-    # and the pause in the middle is exactly when the customer most needs
-    # to see something.
+async def test_the_hook_receives_every_event_the_turn_produced():
+    # NAMED FOR WHAT IT CHECKS. This used to be called "published as the
+    # turn runs, not at the end" and checked no such thing -- it asserts
+    # on contents, and contents look identical whether the events arrive
+    # one at a time or in a single lump at the end. They were arriving in
+    # a lump, and this test was green throughout.
+    #
+    # The timing claim is now made where it can fail:
+    # test_agent_events.py::test_the_tool_chip_reaches_the_caller_before_
+    # the_turn_is_over.
     from agent.loop import run_turn
     from tests.test_agent_loop import (
         FakeMessage,
@@ -118,6 +125,68 @@ async def test_a_turn_without_the_hook_still_works():
     )
 
     assert state["answer"] == "Hi."
+
+
+async def test_the_stream_carries_prose_fragments_before_the_finished_answer(
+    monkeypatch,
+):
+    # The wiring, end to end through this module: the model's fragments
+    # become message_delta frames on the same SSE stream the tool chips
+    # ride, and they arrive BEFORE the message that closes them. Order is
+    # the assertion -- fragments that turned up after the finished answer
+    # would be a slower way of showing nothing.
+    import json as json_
+
+    import agent_server
+    from tests.test_agent_loop import FakeMessage
+
+    async def fake_tools(token, only=None):
+        return []
+
+    class FakeSession:
+        session_id = "sess-1"
+
+        async def execute(self, name, arguments):
+            return {}
+
+    @asynccontextmanager
+    async def fake_session(token, url=None):
+        yield FakeSession()
+
+    def fake_model_call(model=None, on_usage=None, on_delta=None):
+        async def call(messages, tools):
+            for fragment in ["Your ", "order ", "is ORD-1."]:
+                on_delta(fragment)
+                # Let the consumer drain, as a real network read would.
+                await asyncio.sleep(0)
+            return FakeMessage(content="Your order is ORD-1.")
+
+        return call
+
+    monkeypatch.setattr(agent_server, "list_openai_tools", fake_tools)
+    monkeypatch.setattr(agent_server, "session_scoped_executor", fake_session)
+    monkeypatch.setattr(agent_server, "openai_model_call", fake_model_call)
+
+    frames = []
+    async for frame in agent_server._stream_turn("what did I order", "tok"):
+        name, _, payload = frame.decode().partition("\n")
+        frames.append(
+            (name.removeprefix("event: "), json_.loads(payload.removeprefix("data: ")))
+        )
+
+    kinds = [
+        data.get("type", "control") if name == "assistant" else "control"
+        for name, data in frames
+    ]
+
+    assert kinds == ["control", "message_delta", "message_delta", "message_delta", "message"]
+
+    fragments = [d["data"]["text"] for n, d in frames if d.get("type") == "message_delta"]
+    assert "".join(fragments) == "Your order is ORD-1."
+
+    # And they are out of band, so they cannot consume a number the
+    # record needs or be mistaken for a dropped event.
+    assert all(d["seq"] == -1 for n, d in frames if d.get("type") == "message_delta")
 
 
 # --- the routes ----------------------------------------------------------

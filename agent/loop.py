@@ -35,7 +35,12 @@ import config
 from agent.events import approval_required as approval_required_event
 from agent.events import message as message_event
 from agent.events import tool_completed, tool_started
-from agent.prompt import SYSTEM_PROMPT, redact_untrusted_urls, untrusted_urls
+from agent.prompt import (
+    SYSTEM_PROMPT,
+    StreamingRedactor,
+    redact_untrusted_urls,
+    untrusted_urls,
+)
 from agent.tools import (
     AGENT_TOOLS,
     HIGH_RISK_TOOLS,
@@ -98,11 +103,9 @@ def _publish(on_event, state: TurnState, already: int) -> int:
     """Hand the caller every event appended since it was last called.
 
     Driven by the accumulated length rather than by the nodes, which
-    cannot see the caller. Not real-time inside a single graph step --
-    ainvoke returns when the step does -- but it delivers each batch as
-    the graph produces it, and crucially it delivers the
-    approval_required BEFORE the turn blocks on a human, which is the
-    moment that matters.
+    cannot see the caller. The count is what makes publishing idempotent
+    across steps: each event is handed over exactly once, however often
+    this is called.
     """
     events = state.get("events", [])
 
@@ -111,6 +114,28 @@ def _publish(on_event, state: TurnState, already: int) -> int:
             on_event(event)
 
     return len(events)
+
+
+async def _drive(app, payload, settings, on_event, published: int):
+    """Run the graph to its next stopping point, publishing as it goes.
+
+    astream rather than ainvoke, and that is the whole point. ainvoke
+    returns only when the turn is over, so events could not be handed over
+    until then -- the customer watched a spinner and then received the
+    tool chips and the answer together, every chip already resolved. A
+    stream that arrives all at once is not a stream.
+
+    stream_mode="values" yields the accumulated state after each step, and
+    the last one carries __interrupt__ when the graph pauses, so the
+    approval loop below reads exactly what it read before.
+    """
+    state = None
+
+    async for step in app.astream(payload, config=settings, stream_mode="values"):
+        state = step
+        published = _publish(on_event, step, published)
+
+    return state, published
 
 
 def _next_seq(state: TurnState) -> int:
@@ -326,7 +351,8 @@ async def run_turn(
         "configurable": {"thread_id": uuid.uuid4().hex},
     }
 
-    state = await app.ainvoke(
+    state, published = await _drive(
+        app,
         {
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -337,9 +363,10 @@ async def run_turn(
             "failed": [],
             "events": [],
         },
-        config=settings,
+        settings,
+        on_event,
+        published,
     )
-    published = _publish(on_event, state, published)
 
     while state.get("__interrupt__"):
         requests = [
@@ -353,16 +380,20 @@ async def run_turn(
         else:
             decisions = await _decide(approve, requests, approval_timeout_seconds)
 
-        state = await app.ainvoke(
+        state, published = await _drive(
+            app,
             Command(resume=decisions[0] if len(decisions) == 1 else decisions),
-            config=settings,
+            settings,
+            on_event,
+            published,
         )
-        published = _publish(on_event, state, published)
 
     return state
 
 
-def openai_model_call(model: str | None = None, on_usage=None) -> ModelCall:
+def openai_model_call(
+    model: str | None = None, on_usage=None, on_delta=None
+) -> ModelCall:
     """The real model call. Kept separate so the loop stays testable.
 
     `on_usage` receives this request's token usage. Optional, because the
@@ -370,6 +401,19 @@ def openai_model_call(model: str | None = None, on_usage=None) -> ModelCall:
     will the cost ceiling in Decision D. A callback keeps that concern
     out of the graph rather than threading usage through the state, which
     every node would then have to carry and none would use.
+
+    `on_delta` receives the answer in fragments as the model writes them.
+    Also optional: the tests and the eval harness read the finished
+    message, and only the chat UI needs to watch it arrive. The fragments
+    are a rendering hint and nothing more -- the message this returns is
+    unchanged and remains what the graph, the state and the record are
+    built from.
+
+    THE FRAGMENTS ARE REDACTED ON THE WAY OUT. call_model redacts the
+    finished answer, which is no defence here: a fragment released
+    unchecked has already been read by the time the finished answer
+    exists. StreamingRedactor applies the same rule to text that has not
+    finished arriving.
     """
     from openai import AsyncOpenAI
 
@@ -381,14 +425,37 @@ def openai_model_call(model: str | None = None, on_usage=None) -> ModelCall:
     chosen = model or config.OPENAI_MODEL
 
     async def call(messages: list[dict], tools: list[dict]):
-        response = await client.chat.completions.create(
+        redactor = StreamingRedactor(untrusted_urls(messages))
+
+        async with client.chat.completions.stream(
             model=chosen,
             max_completion_tokens=1024,
             messages=messages,
             tools=tools or None,
-        )
+            # A streamed request reports no usage unless asked. Omitting
+            # this would not break a turn -- it would quietly zero the
+            # eval harness's cost column, which is worse.
+            stream_options={"include_usage": True},
+        ) as stream:
+            async for event in stream:
+                # Other kinds arrive (chunks, tool-call argument deltas,
+                # completion notices). The SDK assembles those into the
+                # final message; only prose is shown as it is written.
+                if on_delta is not None and event.type == "content.delta":
+                    fragment = redactor.push(event.delta)
+                    if fragment:
+                        on_delta(fragment)
+
+            response = await stream.get_final_completion()
+
+        if on_delta is not None:
+            tail = redactor.finish()
+            if tail:
+                on_delta(tail)
+
         if on_usage is not None and response.usage is not None:
             on_usage(response.usage)
+
         return response.choices[0].message
 
     return call

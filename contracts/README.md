@@ -37,21 +37,52 @@ working.
 | Field | Meaning |
 |---|---|
 | `v` | Schema version, `1` from the first commit. Phase 3 consumes this too. |
-| `seq` | Monotonic from 0, no gaps. Makes replay deterministic and a dropped event detectable. |
-| `type` | One of the five below. |
+| `seq` | Monotonic from 0, no gaps — **or `-1`**, see below. Makes replay deterministic and a dropped event detectable. |
+| `type` | One of the six below. |
 | `data` | Payload, shape determined by `type`. |
+
+### `seq: -1` means out of band
+
+Some events are produced *beside* the turn rather than by it: a live rendering hint, or a
+notice the HTTP surface raises before the graph blocks on a human. They carry `-1`, they are
+**excluded from gap accounting**, and there may be any number of them. Counting them would
+drag the low end of the range down and invent gaps that never happened.
+
+Two things carry it today: `message_delta`, and the `approval_required` that
+`agent_server.py` emits ahead of the pause. Everything else is numbered from 0.
 
 The payload is nested rather than flattened so that an envelope key and a future payload key
 can never collide.
 
-## The five events
+## The six events
 
 ### `message`
 Assistant prose — the only event whose content the model authored, and therefore the only
-one a UI must treat as untrusted text.
+one a UI must treat as untrusted text. **Authoritative**: this is the redacted text, and
+where it differs from the fragments that preceded it, this is the one that stays on screen.
 ```json
 {"text": "Your most recent order is ORD-1042, still pending."}
 ```
+
+### `message_delta`
+A fragment of that prose, while it is still being written. Always `seq: -1`.
+
+Additive and optional, in the strict sense: a reader that has never heard of this type
+ignores it and shows the finished `message`, which is exactly the behaviour this contract had
+before deltas existed. That is what made it safe to add to a frozen v1.
+```json
+{"text": "Your most recent order "}
+```
+
+A reducer must **accumulate fragments into a pending buffer and let the next `message`
+replace it, not join it** — otherwise the customer reads the answer twice. A run that no
+`message` ever closes (the turn is still in flight, or it was cut off) survives as partial
+text: those words were already on the screen, and erasing them is the worse lie.
+
+The fragments are redacted chunk by chunk and flushed only at whitespace boundaries, because
+a URL contains no whitespace and so is always complete inside one chunk. The `message` is
+redacted over the whole answer. The two agree in practice; where they cannot, the `message`
+wins by the rule above, which is why the ordering is not merely cosmetic.
 
 ### `tool_started`
 `arguments` is a structured object, never a rendered string. A UI that wants to show
@@ -113,15 +144,26 @@ asserting facts about a UI it cannot see.
    direction that actually happens: a newer agent deployed against an older UI must not
    crash it.
 3. **Report a `seq` gap; do not smooth over it.** A dropped event means what is on screen is
-   not what happened, and silence is the worse failure.
+   not what happened, and silence is the worse failure. `seq: -1` is not a gap and is not
+   counted; see above.
 4. **Nothing in a stream is a secret.** These events leave the process for a browser. A test
    in this repository asserts no bearer token or authorization header ever appears in one.
 
-## What is not here yet
+## Streaming
 
-Streaming transport. These events accumulate in turn state; delivering them over the wire as
-they occur is the bridge route's job (storefront Task 3) against an agent HTTP surface that
-does not exist yet (agent Task 8).
+Delivered, and it took three separate pieces — worth listing, because the first two were done
+before the third and the result still arrived in one lump, which is how the gap was found.
+
+1. **The transport.** One turn is one SSE stream (`agent_server.py`), forwarded frame by
+   frame by the storefront's bridge route.
+2. **Publishing as the graph runs.** `run_turn` drives the graph with `astream`, publishing
+   after each step. It used to use `ainvoke`, which returns only when the whole turn is
+   over — so every event, tool chips included, was back-filled at the end.
+3. **Fragments of prose.** The model call streams, and each fragment becomes a
+   `message_delta`.
+
+Miss any one and the customer waits for the whole answer. All three together are what makes
+the chat look like a chat.
 
 `approval_required` **is** emitted, as of agent Task 5, and proved live.
 

@@ -138,6 +138,85 @@ def test_nothing_happens_when_there_is_no_answer_yet():
     assert redact_untrusted_urls(None, {"https://evil.example.com/x"}) is None
 
 
+# --- redacting text that has not finished arriving -----------------------
+#
+# Streaming reopens a hole the finished-text redactor closed. The answer is
+# now shown fragment by fragment as the model writes it, and a fragment
+# released before the whole answer exists cannot be checked against the
+# whole answer. An injected link would flash on screen and then be
+# corrected -- which is not a correction, because the customer already
+# read it and could already have clicked it.
+#
+# The way out is that a URL contains no whitespace: hold back whatever
+# follows the last space, and every URL is complete inside the part that
+# is released.
+
+from agent.prompt import StreamingRedactor  # noqa: E402
+
+
+def released(redactor: StreamingRedactor, chunks: list[str]) -> str:
+    return "".join(redactor.push(chunk) for chunk in chunks) + redactor.finish()
+
+
+def test_a_url_split_across_two_fragments_never_escapes_in_pieces():
+    # THE MUST PROVE. The model emits a URL a few characters at a time.
+    # Nothing recognisable may reach the customer at any point in between,
+    # and what does arrive must be the redaction.
+    redactor = StreamingRedactor({"https://evil.example.com/x"})
+    chunks = ["Please ", "visit ", "https://evil.", "example", ".com/x", " to verify."]
+
+    escaped = []
+    out = ""
+    for chunk in chunks:
+        out += redactor.push(chunk)
+        escaped.append(out)
+    out += redactor.finish()
+
+    assert all("evil.example.com" not in seen for seen in escaped)
+    assert "evil.example.com" not in out
+    assert REDACTION in out
+
+
+def test_the_released_text_still_reads_as_the_answer_the_model_wrote():
+    # Holding fragments back must not lose or reorder them.
+    redactor = StreamingRedactor(set())
+
+    assert released(redactor, ["Those are ", "the Nimbus 9s,", " $120."]) == (
+        "Those are the Nimbus 9s, $120."
+    )
+
+
+def test_a_url_at_the_very_end_with_no_trailing_space_is_still_caught():
+    # The last fragment is never followed by whitespace. finish() is what
+    # stops that being the one gap in the boundary rule.
+    redactor = StreamingRedactor({"https://evil.example.com/x"})
+
+    out = released(redactor, ["Go to ", "https://evil.example.com/x"])
+
+    assert "evil.example.com" not in out
+    assert REDACTION in out
+
+
+def test_a_turn_with_nothing_to_redact_holds_nothing_back():
+    # The common case by far. Buffering to a word boundary when there is
+    # no URL to catch would be latency bought for nothing.
+    redactor = StreamingRedactor(set())
+
+    assert redactor.push("Those") == "Those"
+
+
+def test_the_fragments_add_up_to_what_the_finished_redactor_would_produce():
+    # The two redactions run over different units -- fragments here, the
+    # whole answer in call_model -- and the contract says the message wins
+    # where they differ. They should not differ.
+    answer = "Check https://evil.example.com/x and https://evil.example.com/a/b now."
+    urls = {"https://evil.example.com/x", "https://evil.example.com/a/b"}
+
+    streamed = released(StreamingRedactor(urls), list(answer))
+
+    assert streamed == redact_untrusted_urls(answer, urls)
+
+
 # --- wiring --------------------------------------------------------------
 
 from agent.loop import run_turn  # noqa: E402

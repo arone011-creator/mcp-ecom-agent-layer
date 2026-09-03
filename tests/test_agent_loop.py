@@ -65,6 +65,135 @@ def recording_executor(results):
     return execute
 
 
+# --- the real model call -------------------------------------------------
+#
+# Stubbed at the SDK boundary rather than skipped. What is under test is
+# this project's half of the streaming call: that fragments are handed
+# over as they arrive, that they go through the redactor first, that the
+# finished message is still returned unchanged so the graph above is
+# untouched, and that usage is still reported -- the eval harness prices
+# every sweep from it, and asking for a stream is exactly how a request
+# stops reporting it by default.
+
+
+class FakeStream:
+    """Stands in for client.chat.completions.stream(...)."""
+
+    def __init__(self, deltas, final):
+        self._deltas = deltas
+        self._final = final
+        self.kwargs = {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def __aiter__(self):
+        async def events():
+            for delta in self._deltas:
+                yield type("E", (), {"type": "content.delta", "delta": delta})()
+            # The SDK emits kinds this code must ignore rather than choke on.
+            yield type("E", (), {"type": "chunk", "delta": None})()
+
+        return events()
+
+    async def get_final_completion(self):
+        return self._final
+
+
+def fake_openai(monkeypatch, deltas, message=None, usage=None):
+    """Replace the SDK's client with one that replays `deltas`."""
+    final = type(
+        "Completion",
+        (),
+        {
+            "choices": [type("C", (), {"message": message or FakeMessage(content="")})()],
+            "usage": usage,
+        },
+    )()
+    stream = FakeStream(deltas, final)
+
+    class FakeCompletions:
+        def stream(self, **kwargs):
+            stream.kwargs = kwargs
+            return stream
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self.chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+    import openai
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", FakeClient)
+    return stream
+
+
+async def test_the_model_call_hands_over_fragments_as_they_arrive(monkeypatch):
+    from agent.loop import openai_model_call
+
+    fake_openai(
+        monkeypatch,
+        ["Your ", "order ", "is ORD-1."],
+        message=FakeMessage(content="Your order is ORD-1."),
+    )
+
+    seen = []
+    message = await openai_model_call(on_delta=seen.append)([], [])
+
+    assert "".join(seen) == "Your order is ORD-1."
+    assert message.content == "Your order is ORD-1."
+
+
+async def test_a_fragment_is_redacted_before_anyone_sees_it(monkeypatch):
+    # The streaming half of the URL provenance guard, asserted where it
+    # actually runs. The finished-answer redaction in call_model cannot
+    # help here: by the time it runs, the fragment has been read.
+    from agent.loop import openai_model_call
+
+    fake_openai(monkeypatch, ["Visit ", "https://evil.example.com/x", " now."])
+
+    messages = [
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": '{"d": "<untrusted-user-content>https://evil.example.com/x'
+            '</untrusted-user-content>"}',
+        }
+    ]
+
+    seen = []
+    await openai_model_call(on_delta=seen.append)(messages, [])
+
+    assert "evil.example.com" not in "".join(seen)
+
+
+async def test_usage_is_still_reported_when_the_response_is_streamed(monkeypatch):
+    # A streamed request omits usage unless it is asked for. Losing it
+    # would not break a turn -- it would silently zero the eval harness's
+    # cost column, which is the kind of failure nobody notices.
+    from agent.loop import openai_model_call
+
+    stream = fake_openai(monkeypatch, ["hi"], usage={"total_tokens": 42})
+
+    seen = []
+    await openai_model_call(on_usage=seen.append)([], [])
+
+    assert seen == [{"total_tokens": 42}]
+    assert stream.kwargs["stream_options"] == {"include_usage": True}
+
+
+async def test_a_caller_that_wants_no_fragments_still_gets_its_answer(monkeypatch):
+    # The eval harness and the tests pass no on_delta. Streaming must not
+    # become mandatory just because the chat UI wants it.
+    from agent.loop import openai_model_call
+
+    fake_openai(monkeypatch, ["a", "b"], message=FakeMessage(content="ab"))
+
+    assert (await openai_model_call()([], [])).content == "ab"
+
+
 async def test_a_turn_with_no_tool_call_answers_directly():
     state = await run_turn(
         "hello",

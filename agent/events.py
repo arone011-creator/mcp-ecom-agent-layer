@@ -6,7 +6,7 @@ both sides test against. Change the shape here and that fixture fails on
 both sides, which is the point: two prose descriptions of one contract
 drift, one shared artefact does not.
 
-Five types, one envelope, versioned from the first commit because Phase
+Six types, one envelope, versioned from the first commit because Phase
 3's interrupt payload consumes it too.
 """
 
@@ -15,8 +15,22 @@ from typing import Any
 SCHEMA_VERSION = 1
 
 EVENT_TYPES = frozenset(
-    {"message", "tool_started", "tool_completed", "approval_required", "error"}
+    {
+        "message",
+        "message_delta",
+        "tool_started",
+        "tool_completed",
+        "approval_required",
+        "error",
+    }
 )
+
+# The sequence number of an event that is NOT part of the numbered record:
+# a live rendering hint produced beside the turn rather than by it. Two
+# things carry it -- message_delta, and the approval_required that
+# agent_server.py emits before the graph blocks -- and neither may consume
+# a number the record needs.
+OUT_OF_BAND = -1
 
 
 def _envelope(seq: int, type_: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -28,6 +42,21 @@ def _envelope(seq: int, type_: str, data: dict[str, Any]) -> dict[str, Any]:
 def message(seq: int, text: str) -> dict[str, Any]:
     """Assistant prose. The only event whose content the model authored."""
     return _envelope(seq, "message", {"text": text})
+
+
+def message_delta(text: str) -> dict[str, Any]:
+    """A fragment of assistant prose, while it is still being written.
+
+    ADDITIVE AND OPTIONAL. The `message` event that follows carries the
+    whole answer and remains authoritative; these exist so the customer
+    watches it arrive instead of staring at a spinner. A reader that has
+    never heard of this type ignores it and shows the finished message,
+    which is precisely the behaviour this contract had before.
+
+    Takes no sequence number. Deltas are out of band by definition, and a
+    caller that could pick a number could pick one the record needs.
+    """
+    return _envelope(OUT_OF_BAND, "message_delta", {"text": text})
 
 
 def tool_started(
@@ -95,6 +124,10 @@ def replay(events: list[dict[str, Any]]) -> dict[str, Any]:
     order: list[str] = []
     failures: list[dict[str, Any]] = []
     seen: list[int] = []
+    # Prose that has arrived in fragments and has not yet been closed by
+    # the authoritative message. Held apart from `text` so the message can
+    # replace it rather than land beside it as a duplicate.
+    pending = ""
 
     for event in events:
         if event.get("v") != SCHEMA_VERSION:
@@ -103,12 +136,24 @@ def replay(events: list[dict[str, Any]]) -> dict[str, Any]:
                 f"v{SCHEMA_VERSION} reader"
             )
 
-        seen.append(event["seq"])
+        # An out-of-band event is not part of the numbered record. Counted
+        # here it would drag the low end of the range down and invent gaps
+        # that never happened.
+        if event["seq"] != OUT_OF_BAND:
+            seen.append(event["seq"])
+
         type_ = event["type"]
         data = event.get("data", {})
 
-        if type_ == "message":
+        if type_ == "message_delta":
+            pending += data["text"]
+
+        elif type_ == "message":
+            # The message wins. Its text is redacted over the whole answer
+            # and may legitimately differ from the sum of the fragments;
+            # when it does, the redacted one is what the customer keeps.
             text.append(data["text"])
+            pending = ""
 
         elif type_ in ("tool_started", "approval_required"):
             call_id = data["call_id"]
@@ -148,6 +193,12 @@ def replay(events: list[dict[str, Any]]) -> dict[str, Any]:
 
         # Any other type is ignored on purpose. A newer agent must not be
         # able to crash an older reader.
+
+    # A run of fragments no message ever closed: the turn was cut off. The
+    # words were on the customer's screen, so dropping them now would erase
+    # something they read -- a worse lie than an unfinished sentence.
+    if pending:
+        text.append(pending)
 
     expected = range(min(seen), max(seen) + 1) if seen else []
 

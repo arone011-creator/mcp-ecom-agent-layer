@@ -131,3 +131,56 @@ def redact_untrusted_urls(answer: str | None, urls: set[str]) -> str | None:
         cleaned = cleaned.replace(url, REDACTION)
 
     return cleaned
+
+
+class StreamingRedactor:
+    """The same rule, applied to text that has not finished arriving.
+
+    Streaming reopened a hole the function above had closed. Prose is now
+    shown to the customer fragment by fragment, and a fragment cannot be
+    checked against an answer that does not exist yet -- so an injected
+    link would appear on screen and be corrected a second later. That is
+    not a correction: it was read, and it could have been clicked.
+
+    What makes this tractable is that a URL contains no whitespace. Hold
+    back everything after the last space and any URL in the released part
+    is whole, so the existing redaction sees it exactly as it would in a
+    finished answer. The cost is that fragments arrive a word at a time
+    rather than a token at a time, which is no worse to read.
+
+    A model that emitted an enormous unbroken run of non-whitespace would
+    be held back until it stopped. Accepted: that is not prose, and the
+    alternative is releasing text nothing has checked.
+    """
+
+    def __init__(self, urls: set[str]) -> None:
+        self._urls = urls
+        self._held = ""
+
+    def push(self, chunk: str) -> str:
+        """Take a fragment; return whatever is now safe to show."""
+        # Nothing to catch, so nothing to wait for. This is the common
+        # case, and holding a word back would buy latency for nothing.
+        if not self._urls:
+            return chunk
+
+        self._held += chunk
+
+        boundary = 0
+        for index in range(len(self._held) - 1, -1, -1):
+            if self._held[index].isspace():
+                boundary = index + 1
+                break
+
+        release, self._held = self._held[:boundary], self._held[boundary:]
+        return redact_untrusted_urls(release, self._urls) or ""
+
+    def finish(self) -> str:
+        """Release the tail.
+
+        The last fragment of an answer is never followed by whitespace,
+        so without this the boundary rule would have exactly one gap --
+        and the end of a sentence is a natural place to put a link.
+        """
+        release, self._held = self._held, ""
+        return redact_untrusted_urls(release, self._urls) or ""
