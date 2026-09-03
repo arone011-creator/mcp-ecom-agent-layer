@@ -333,8 +333,15 @@ async def run_turn(
     return state
 
 
-def openai_model_call(model: str | None = None) -> ModelCall:
-    """The real model call. Kept separate so the loop stays testable."""
+def openai_model_call(model: str | None = None, on_usage=None) -> ModelCall:
+    """The real model call. Kept separate so the loop stays testable.
+
+    `on_usage` receives this request's token usage. Optional, because the
+    loop does not care what a turn cost -- the eval harness does, and so
+    will the cost ceiling in Decision D. A callback keeps that concern
+    out of the graph rather than threading usage through the state, which
+    every node would then have to carry and none would use.
+    """
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI()
@@ -347,6 +354,8 @@ def openai_model_call(model: str | None = None) -> ModelCall:
             messages=messages,
             tools=tools or None,
         )
+        if on_usage is not None and response.usage is not None:
+            on_usage(response.usage)
         return response.choices[0].message
 
     return call
