@@ -646,6 +646,35 @@ TASK 8 - DEPLOY AND MEASURE    [DONE 2026-09-03]
         PORT and the private port could not be confirmed. Worth revisiting
         with the private-only change above.
 
+    REGION CONSOLIDATION, 2026-09-03, after Task 8. The three services
+    were split across continents: web in Singapore, mcp and agent in San
+    Francisco. Every tool call therefore crossed the Pacific -- agent
+    (sfo) -> mcp (sfo) -> the storefront API (sin) -- and the MCP session
+    handshake paid that crossing several times over.
+
+    Both were moved to asia-southeast1. Measured, not assumed:
+
+      MCP TOOL p50, sfo -> sin
+        search_products    775 -> 244    get_orders        836 -> 266
+        get_product        890 -> 265    get_cart          831 -> 274
+        check_inventory    877 -> 271    add_to_cart       836 -> 318
+        remove_from_cart   842 -> 335
+      Every tool roughly three times faster; ~570ms per call was the
+      ocean.
+
+      WORKFLOW p50
+        headphones-add-to-cart   10797 -> 6203   -43%
+        showcase-no-cart          4813 -> 3438   -29%
+        orders-recent             4906 -> 3922   -20%
+        injection-* (stubbed)     ~2400 -> ~2270  flat
+
+    THE STUBBED FIXTURES ARE THE CONTROL, and they earn their keep here:
+    they make no MCP calls at all, only OpenAI. Moving the agent AWAY
+    from OpenAI cost nothing measurable -- they came out flat or
+    marginally faster, inside run-to-run noise. The trade-off flagged
+    before the move did not materialise, and that is a measurement rather
+    than a hope because a fixture existed that isolated it.
+
     IN PLAIN TERMS
     Nine steps, each ending in a review. The order matters: check the
     tools work before adding the AI, use the harmless actions before the
