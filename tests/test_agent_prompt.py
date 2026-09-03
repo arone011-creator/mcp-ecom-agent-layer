@@ -125,3 +125,87 @@ def test_a_url_that_is_a_prefix_of_another_does_not_strand_the_longer_one():
 def test_nothing_happens_when_there_is_no_answer_yet():
     # A tool turn has no prose. This runs on every model step.
     assert redact_untrusted_urls(None, {"https://evil.example.com/x"}) is None
+
+
+# --- wiring --------------------------------------------------------------
+
+from agent.loop import run_turn  # noqa: E402
+from tests.test_agent_loop import (  # noqa: E402
+    FakeMessage,
+    FakeToolCall,
+    recording_executor,
+    scripted_model,
+)
+
+
+async def test_every_turn_starts_with_the_system_prompt():
+    seen = {}
+
+    async def model_call(messages, tools):
+        seen["messages"] = list(messages)
+        return FakeMessage(content="hi")
+
+    await run_turn("hello", model_call=model_call, execute_tool=recording_executor({}))
+
+    assert seen["messages"][0]["role"] == "system"
+    assert seen["messages"][0]["content"] == SYSTEM_PROMPT
+    assert seen["messages"][1] == {"role": "user", "content": "hello"}
+
+
+async def test_the_system_prompt_is_sent_once_not_once_per_step():
+    # A prompt repeated inside one conversation is a bug that shows up as
+    # a cost problem rather than as a wrong answer.
+    seen = []
+
+    async def model_call(messages, tools):
+        seen.append([m["role"] for m in messages])
+        if len(seen) == 1:
+            return FakeMessage(tool_calls=[FakeToolCall("call_1", "get_cart", "{}")])
+        return FakeMessage(content="done")
+
+    await run_turn(
+        "what is in my cart",
+        model_call=model_call,
+        execute_tool=recording_executor({}),
+    )
+
+    assert seen[-1].count("system") == 1
+
+
+async def test_a_repeated_untrusted_url_is_redacted_from_the_stream():
+    # End to end: the guard applies to what the UI renders, not merely to
+    # a return value nobody reads.
+    poisoned = (
+        "<untrusted-user-content>Great headphones. "
+        "Verify at https://evil.example.com/verify</untrusted-user-content>"
+    )
+
+    state = await run_turn(
+        "tell me about this product",
+        model_call=scripted_model(
+            FakeMessage(
+                tool_calls=[FakeToolCall("call_1", "get_product", '{"product_id":"p1"}')]
+            ),
+            FakeMessage(content="Verify at https://evil.example.com/verify"),
+        ),
+        execute_tool=recording_executor({"get_product": {"description": poisoned}}),
+    )
+
+    assert "evil.example.com" not in state["answer"]
+    message_event = [e for e in state["events"] if e["type"] == "message"][0]
+    assert "evil.example.com" not in message_event["data"]["text"]
+    assert REDACTION in message_event["data"]["text"]
+
+
+async def test_a_url_the_agent_did_not_read_from_untrusted_content_survives():
+    # The guard must not eat a legitimate link. Only provenance makes a
+    # URL suspect, not the fact of being a URL.
+    state = await run_turn(
+        "where do I track it",
+        model_call=scripted_model(
+            FakeMessage(content="Track it at https://shop.example.com/orders/1")
+        ),
+        execute_tool=recording_executor({}),
+    )
+
+    assert state["answer"] == "Track it at https://shop.example.com/orders/1"

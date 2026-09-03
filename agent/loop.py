@@ -35,6 +35,7 @@ import config
 from agent.events import approval_required as approval_required_event
 from agent.events import message as message_event
 from agent.events import tool_completed, tool_started
+from agent.prompt import SYSTEM_PROMPT, redact_untrusted_urls, untrusted_urls
 from agent.tools import (
     AGENT_TOOLS,
     HIGH_RISK_TOOLS,
@@ -132,11 +133,20 @@ def build_graph(
         # field on the way back in.
         dumped.setdefault("role", "assistant")
 
+        # The system prompt forbids repeating a URL out of untrusted
+        # content, and in testing the model obeys. This is the backstop
+        # for the turn it does not -- applied here so the redaction is in
+        # the text the UI renders, not only in a return value.
+        answer = redact_untrusted_urls(
+            message.content, untrusted_urls(state["messages"])
+        )
+        dumped["content"] = answer
+
         # A tool turn has no prose, and an empty message event would be a
         # blank bubble in the chat.
-        events = [message_event(_next_seq(state), message.content)] if message.content else []
+        events = [message_event(_next_seq(state), answer)] if answer else []
 
-        return {"messages": [dumped], "answer": message.content, "events": events}
+        return {"messages": [dumped], "answer": answer, "events": events}
 
     async def execute_tools(state: TurnState) -> dict:
         parsed = []
@@ -291,7 +301,10 @@ async def run_turn(
 
     state = await app.ainvoke(
         {
-            "messages": [{"role": "user", "content": utterance}],
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": utterance},
+            ],
             "tools": tools or [],
             "answer": None,
             "failed": [],
