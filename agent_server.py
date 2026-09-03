@@ -27,6 +27,7 @@ contract does not have to change.
 import asyncio
 import json
 import subprocess
+import traceback
 import uuid
 from typing import Any
 
@@ -36,7 +37,9 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 import config
+from agent.events import OUT_OF_BAND
 from agent.events import approval_required as approval_required_event
+from agent.events import error as error_event
 from agent.events import message_delta
 from agent.loop import openai_model_call, run_turn, session_scoped_executor
 from agent.tools import AGENT_TOOLS, list_openai_tools
@@ -225,6 +228,27 @@ async def _stream_turn(utterance: str, token: str):
                     session_id=session.session_id,
                     on_event=queue.put_nowait,
                 )
+            except Exception:
+                # A TURN THAT DIES MUST SAY SO. The response has already
+                # begun -- 200, control frame, possibly half an answer --
+                # so an exception here just stops the stream, and a stream
+                # that stops cleanly with nothing in it is indistinguishable
+                # from an assistant that had nothing to say. That is how a
+                # broken deploy reached a customer as a blank panel.
+                #
+                # The exception is logged, never sent: a stack trace means
+                # nothing to a shopper and can carry things a browser has
+                # no business seeing.
+                traceback.print_exc()
+                queue.put_nowait(
+                    error_event(
+                        OUT_OF_BAND,
+                        "The assistant ran into a problem and could not finish "
+                        "that. Nothing was changed. Please try again.",
+                        retryable=True,
+                    )
+                )
+                return None
             finally:
                 await queue.put(None)
 
@@ -237,6 +261,10 @@ async def _stream_turn(utterance: str, token: str):
                     break
                 yield _frame("assistant", event)
 
+            # Awaited for cancellation and cleanup only. drive() swallows
+            # the failure deliberately, having already reported it as an
+            # event -- raising here would abort the stream a moment after
+            # telling the customer what went wrong.
             await task
         finally:
             # An aborted stream must not leave the turn registered, or the

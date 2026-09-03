@@ -391,6 +391,26 @@ async def run_turn(
     return state
 
 
+def _openai_client():
+    """Seam. Tests replace the transport under this, not this.
+
+    The same shape as _client_for below, and for a sharper reason. The
+    first version of the streaming call was tested against a hand-made
+    stand-in for the whole client, which meant the SDK's own request
+    validation never ran in any test -- and the SDK is what rejected the
+    call in production, on the first tool, before a token was read. A
+    seam here lets a test drive the real SDK over a fake network, which
+    is where the bug actually was.
+    """
+    from openai import AsyncOpenAI
+
+    # The SDK defaults to a 600-second timeout and retries, so one stalled
+    # request can hold a turn for half an hour. Observed: an eval sweep sat
+    # for 36 minutes on 34 seconds of CPU. A turn that cannot answer in a
+    # minute has already failed the customer waiting for it.
+    return AsyncOpenAI(timeout=config.OPENAI_TIMEOUT_SECONDS)
+
+
 def openai_model_call(
     model: str | None = None, on_usage=None, on_delta=None
 ) -> ModelCall:
@@ -414,44 +434,62 @@ def openai_model_call(
     unchecked has already been read by the time the finished answer
     exists. StreamingRedactor applies the same rule to text that has not
     finished arriving.
-    """
-    from openai import AsyncOpenAI
 
-    # The SDK defaults to a 600-second timeout and retries, so one stalled
-    # request can hold a turn for half an hour. Observed: an eval sweep sat
-    # for 36 minutes on 34 seconds of CPU. A turn that cannot answer in a
-    # minute has already failed the customer waiting for it.
-    client = AsyncOpenAI(timeout=config.OPENAI_TIMEOUT_SECONDS)
+    NOT client.chat.completions.stream(). That helper auto-parses tool
+    arguments and therefore refuses any tool that is not `strict`, and
+    these tools come from the MCP server's own schemas, which are not --
+    to_openai_tool re-nests them and deliberately does not rewrite them.
+    It raises ValueError on the first tool before a single token is read.
+    So: the plain streaming request, with the SDK's own accumulator
+    assembling the chunks. ChatCompletionStreamState is given no tools
+    for exactly the same reason, and needs none -- it concatenates
+    tool-call argument fragments regardless.
+    """
+    from openai.lib.streaming.chat import ChatCompletionStreamState
+
+    client = _openai_client()
     chosen = model or config.OPENAI_MODEL
 
     async def call(messages: list[dict], tools: list[dict]):
         redactor = StreamingRedactor(untrusted_urls(messages))
+        state = ChatCompletionStreamState()
 
-        async with client.chat.completions.stream(
+        stream = await client.chat.completions.create(
             model=chosen,
             max_completion_tokens=1024,
             messages=messages,
             tools=tools or None,
+            stream=True,
             # A streamed request reports no usage unless asked. Omitting
             # this would not break a turn -- it would quietly zero the
             # eval harness's cost column, which is worse.
             stream_options={"include_usage": True},
-        ) as stream:
-            async for event in stream:
-                # Other kinds arrive (chunks, tool-call argument deltas,
-                # completion notices). The SDK assembles those into the
-                # final message; only prose is shown as it is written.
-                if on_delta is not None and event.type == "content.delta":
-                    fragment = redactor.push(event.delta)
-                    if fragment:
-                        on_delta(fragment)
+        )
 
-            response = await stream.get_final_completion()
+        async for chunk in stream:
+            state.handle_chunk(chunk)
+
+            if on_delta is None:
+                continue
+
+            for choice in chunk.choices:
+                # Tool-call fragments arrive on this same stream and are
+                # the accumulator's business, not the customer's. Only
+                # prose is shown as it is written.
+                text = choice.delta.content
+                if not text:
+                    continue
+
+                fragment = redactor.push(text)
+                if fragment:
+                    on_delta(fragment)
 
         if on_delta is not None:
             tail = redactor.finish()
             if tail:
                 on_delta(tail)
+
+        response = state.get_final_completion()
 
         if on_usage is not None and response.usage is not None:
             on_usage(response.usage)

@@ -189,6 +189,99 @@ async def test_the_stream_carries_prose_fragments_before_the_finished_answer(
     assert all(d["seq"] == -1 for n, d in frames if d.get("type") == "message_delta")
 
 
+async def test_a_turn_that_dies_mid_stream_says_so_instead_of_going_quiet(
+    monkeypatch,
+):
+    # HOW THE STREAMING BUG REACHED A CUSTOMER UNANNOUNCED. The turn
+    # raised inside the model call, after the response had already begun
+    # with a 200 and a control frame. The stream simply stopped. The
+    # browser saw a clean end with nothing in it, so the panel showed the
+    # question and then blank -- indistinguishable from an assistant that
+    # had nothing to say.
+    #
+    # The contract has carried an `error` event from the first commit for
+    # exactly this, and nothing had ever emitted one.
+    import json as json_
+
+    import agent_server
+    from tests.test_agent_loop import FakeMessage  # noqa: F401
+
+    async def fake_tools(token, only=None):
+        return []
+
+    class FakeSession:
+        session_id = "sess-1"
+
+        async def execute(self, name, arguments):
+            return {}
+
+    @asynccontextmanager
+    async def fake_session(token, url=None):
+        yield FakeSession()
+
+    def exploding_model_call(model=None, on_usage=None, on_delta=None):
+        async def call(messages, tools):
+            raise ValueError(
+                "`search_products` is not strict. "
+                "Only `strict` function tools can be auto-parsed"
+            )
+
+        return call
+
+    monkeypatch.setattr(agent_server, "list_openai_tools", fake_tools)
+    monkeypatch.setattr(agent_server, "session_scoped_executor", fake_session)
+    monkeypatch.setattr(agent_server, "openai_model_call", exploding_model_call)
+
+    events = []
+    async for frame in agent_server._stream_turn("what did I order", "tok"):
+        name, _, payload = frame.decode().partition("\n")
+        if name == "event: assistant":
+            events.append(json_.loads(payload.removeprefix("data: ")))
+
+    assert [e["type"] for e in events] == ["error"]
+    assert events[0]["data"]["retryable"] is True
+
+    # The customer is told something went wrong; they are NOT shown the
+    # exception. A stack trace is a leak and means nothing to a shopper.
+    assert "strict" not in events[0]["data"]["message"]
+    assert "search_products" not in events[0]["data"]["message"]
+
+
+async def test_a_failed_turn_does_not_leave_itself_registered(monkeypatch):
+    # The registry holds an open MCP session per turn. One that survives
+    # a crash is a leak with a slow fuse.
+    import agent_server
+
+    async def fake_tools(token, only=None):
+        return []
+
+    class FakeSession:
+        session_id = "sess-1"
+
+        async def execute(self, name, arguments):
+            return {}
+
+    @asynccontextmanager
+    async def fake_session(token, url=None):
+        yield FakeSession()
+
+    def exploding_model_call(model=None, on_usage=None, on_delta=None):
+        async def call(messages, tools):
+            raise RuntimeError("boom")
+
+        return call
+
+    monkeypatch.setattr(agent_server, "list_openai_tools", fake_tools)
+    monkeypatch.setattr(agent_server, "session_scoped_executor", fake_session)
+    monkeypatch.setattr(agent_server, "openai_model_call", exploding_model_call)
+
+    before = len(agent_server.registry._turns)
+    async for _ in agent_server._stream_turn("hello", "tok"):
+        pass
+
+    assert len(agent_server.registry._turns) == before
+
+
 # --- the routes ----------------------------------------------------------
 
 from starlette.testclient import TestClient  # noqa: E402

@@ -6,6 +6,8 @@
 # when the model stops, and refuse an identity argument), not the model's
 # judgement. That is what the eval harness is for.
 
+import json
+
 import pytest
 
 from agent.loop import build_graph, run_turn
@@ -67,83 +69,187 @@ def recording_executor(results):
 
 # --- the real model call -------------------------------------------------
 #
-# Stubbed at the SDK boundary rather than skipped. What is under test is
-# this project's half of the streaming call: that fragments are handed
-# over as they arrive, that they go through the redactor first, that the
-# finished message is still returned unchanged so the graph above is
-# untouched, and that usage is still reported -- the eval harness prices
-# every sweep from it, and asking for a stream is exactly how a request
-# stops reporting it by default.
+# DRIVEN THROUGH THE REAL SDK, OVER A FAKE NETWORK. The first version of
+# these tests replaced the whole client with a stand-in, which meant the
+# SDK's own request validation never ran -- and the SDK is exactly what
+# refused the call in production:
+#
+#   ValueError: `search_products` is not strict.
+#               Only `strict` function tools can be auto-parsed
+#
+# raised by client.chat.completions.stream() on the first tool, before a
+# token was read. Four green tests said the streaming call worked. They
+# were testing my idea of the SDK, not the SDK.
+#
+# So the seam is now the transport: httpx.MockTransport serves the wire
+# format, and everything above it -- validation, chunk parsing, tool-call
+# assembly, usage -- is the real library.
+
+import httpx  # noqa: E402
+
+from agent.tools import to_openai_tool  # noqa: E402
 
 
-class FakeStream:
-    """Stands in for client.chat.completions.stream(...)."""
-
-    def __init__(self, deltas, final):
-        self._deltas = deltas
-        self._final = final
-        self.kwargs = {}
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-    def __aiter__(self):
-        async def events():
-            for delta in self._deltas:
-                yield type("E", (), {"type": "content.delta", "delta": delta})()
-            # The SDK emits kinds this code must ignore rather than choke on.
-            yield type("E", (), {"type": "chunk", "delta": None})()
-
-        return events()
-
-    async def get_final_completion(self):
-        return self._final
+def sse(**fields) -> str:
+    body = {
+        "id": "chatcmpl-1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "gpt-4.1",
+        "choices": [],
+    }
+    body.update(fields)
+    return "data: " + json.dumps(body) + "\n\n"
 
 
-def fake_openai(monkeypatch, deltas, message=None, usage=None):
-    """Replace the SDK's client with one that replays `deltas`."""
-    final = type(
-        "Completion",
-        (),
-        {
-            "choices": [type("C", (), {"message": message or FakeMessage(content="")})()],
-            "usage": usage,
-        },
-    )()
-    stream = FakeStream(deltas, final)
+def prose(text: str, first: bool = False) -> str:
+    delta = {"content": text}
+    # The real API names the role once, in the first chunk only.
+    if first:
+        delta["role"] = "assistant"
+    return sse(choices=[{"index": 0, "delta": delta, "finish_reason": None}])
 
-    class FakeCompletions:
-        def stream(self, **kwargs):
-            stream.kwargs = kwargs
-            return stream
 
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            self.chat = type("Chat", (), {"completions": FakeCompletions()})()
+def tool_fragment(call_id=None, name=None, arguments=None) -> str:
+    function = {}
+    if name is not None:
+        function["name"] = name
+    if arguments is not None:
+        function["arguments"] = arguments
 
-    import openai
+    call = {"index": 0, "type": "function", "function": function}
+    if call_id:
+        call["id"] = call_id
 
-    monkeypatch.setattr(openai, "AsyncOpenAI", FakeClient)
-    return stream
+    return sse(
+        choices=[
+            {"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": None}
+        ]
+    )
+
+
+def usage_frame(total=15) -> str:
+    return sse(
+        usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": total}
+    )
+
+
+DONE = "data: [DONE]\n\n"
+
+
+# The production tool shape, built by the production translator. It has no
+# `strict` key -- to_openai_tool re-nests the MCP server's schema and
+# deliberately does not rewrite it -- which is precisely what the parsing
+# helper rejected. Passing these through the request is the regression.
+def real_tools():
+    from mcp.types import Tool
+
+    return [
+        to_openai_tool(
+            Tool(
+                name="search_products",
+                description="Search the catalogue",
+                inputSchema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                },
+            )
+        )
+    ]
+
+
+def openai_over(monkeypatch, wire: str):
+    """Point the real SDK at a fake network serving `wire`."""
+    import agent.loop as loop_module
+    from openai import AsyncOpenAI
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=wire.encode(),
+        )
+
+    def client():
+        return AsyncOpenAI(
+            api_key="test-key-not-a-real-one",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+
+    monkeypatch.setattr(loop_module, "_openai_client", client)
+    return seen
+
+
+async def test_the_production_tool_schemas_are_accepted_by_the_streaming_call(
+    monkeypatch,
+):
+    # THE REGRESSION. This exact call raised ValueError in production on
+    # the parsing helper, so the whole turn died before the first token
+    # and the customer saw an empty panel.
+    from agent.loop import openai_model_call
+
+    seen = openai_over(monkeypatch, prose("Found some.", first=True) + DONE)
+
+    message = await openai_model_call()([{"role": "user", "content": "shoes"}], real_tools())
+
+    assert message.content == "Found some."
+    # And the tools really did travel, rather than being dropped on the
+    # way and making the acceptance meaningless.
+    assert seen["body"]["tools"][0]["function"]["name"] == "search_products"
+    assert "strict" not in seen["body"]["tools"][0]["function"]
 
 
 async def test_the_model_call_hands_over_fragments_as_they_arrive(monkeypatch):
     from agent.loop import openai_model_call
 
-    fake_openai(
+    openai_over(
         monkeypatch,
-        ["Your ", "order ", "is ORD-1."],
-        message=FakeMessage(content="Your order is ORD-1."),
+        prose("Your ", first=True) + prose("order ") + prose("is ORD-1.") + DONE,
     )
 
     seen = []
-    message = await openai_model_call(on_delta=seen.append)([], [])
+    message = await openai_model_call(on_delta=seen.append)([], real_tools())
 
+    assert len(seen) > 1, "arrived in one lump, which is the bug this replaced"
     assert "".join(seen) == "Your order is ORD-1."
     assert message.content == "Your order is ORD-1."
+
+
+async def test_a_tool_call_split_across_chunks_is_reassembled(monkeypatch):
+    # Arguments arrive a few characters at a time. Assembling them is the
+    # accumulator's job, and getting it wrong would break every tool call
+    # rather than merely the display.
+    from agent.loop import openai_model_call
+
+    openai_over(
+        monkeypatch,
+        tool_fragment(call_id="call_1", name="get_orders", arguments='{"lim')
+        + tool_fragment(arguments='it":3}')
+        + sse(choices=[{"index": 0, "delta": {}, "finish_reason": "tool_calls"}])
+        + DONE,
+    )
+
+    message = await openai_model_call()([], real_tools())
+
+    assert [(c.id, c.function.name, c.function.arguments) for c in message.tool_calls] == [
+        ("call_1", "get_orders", '{"limit":3}')
+    ]
+
+
+async def test_the_assembled_message_says_it_is_from_the_assistant(monkeypatch):
+    # The loop feeds this message straight back to the API. A role field
+    # the accumulator built wrong would be rejected on the next request,
+    # one step later and nowhere near the cause.
+    from agent.loop import openai_model_call
+
+    openai_over(monkeypatch, prose("hi", first=True) + prose(" there") + DONE)
+
+    message = await openai_model_call()([], real_tools())
+
+    assert message.model_dump(exclude_none=True)["role"] == "assistant"
 
 
 async def test_a_fragment_is_redacted_before_anyone_sees_it(monkeypatch):
@@ -152,7 +258,13 @@ async def test_a_fragment_is_redacted_before_anyone_sees_it(monkeypatch):
     # help here: by the time it runs, the fragment has been read.
     from agent.loop import openai_model_call
 
-    fake_openai(monkeypatch, ["Visit ", "https://evil.example.com/x", " now."])
+    openai_over(
+        monkeypatch,
+        prose("Visit ", first=True)
+        + prose("https://evil.example.com/x")
+        + prose(" now.")
+        + DONE,
+    )
 
     messages = [
         {
@@ -164,7 +276,7 @@ async def test_a_fragment_is_redacted_before_anyone_sees_it(monkeypatch):
     ]
 
     seen = []
-    await openai_model_call(on_delta=seen.append)(messages, [])
+    await openai_model_call(on_delta=seen.append)(messages, real_tools())
 
     assert "evil.example.com" not in "".join(seen)
 
@@ -175,13 +287,15 @@ async def test_usage_is_still_reported_when_the_response_is_streamed(monkeypatch
     # cost column, which is the kind of failure nobody notices.
     from agent.loop import openai_model_call
 
-    stream = fake_openai(monkeypatch, ["hi"], usage={"total_tokens": 42})
+    seen_request = openai_over(
+        monkeypatch, prose("hi", first=True) + usage_frame(42) + DONE
+    )
 
-    seen = []
-    await openai_model_call(on_usage=seen.append)([], [])
+    reported = []
+    await openai_model_call(on_usage=reported.append)([], real_tools())
 
-    assert seen == [{"total_tokens": 42}]
-    assert stream.kwargs["stream_options"] == {"include_usage": True}
+    assert [u.total_tokens for u in reported] == [42]
+    assert seen_request["body"]["stream_options"] == {"include_usage": True}
 
 
 async def test_a_caller_that_wants_no_fragments_still_gets_its_answer(monkeypatch):
@@ -189,9 +303,9 @@ async def test_a_caller_that_wants_no_fragments_still_gets_its_answer(monkeypatc
     # become mandatory just because the chat UI wants it.
     from agent.loop import openai_model_call
 
-    fake_openai(monkeypatch, ["a", "b"], message=FakeMessage(content="ab"))
+    openai_over(monkeypatch, prose("ab", first=True) + DONE)
 
-    assert (await openai_model_call()([], [])).content == "ab"
+    assert (await openai_model_call()([], real_tools())).content == "ab"
 
 
 async def test_a_turn_with_no_tool_call_answers_directly():
