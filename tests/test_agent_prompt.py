@@ -1,0 +1,127 @@
+# tests/test_agent_prompt.py
+#
+# The system prompt is data, not an f-string buried in the loop, so its
+# content can be asserted. These tests are deliberately about SUBSTANCE --
+# does it say the thing -- rather than wording, which should stay free to
+# improve. The wording's effect on a real model is the live gate's job.
+
+from agent.prompt import SYSTEM_PROMPT, UNTRUSTED_TAG
+
+
+def test_the_prompt_names_the_exact_tag_the_server_emits():
+    # A prompt describing a different tag than the server wraps with is a
+    # boundary that exists in two places and matches in neither.
+    from untrusted_content import mark_untrusted
+
+    assert UNTRUSTED_TAG in SYSTEM_PROMPT
+    assert mark_untrusted("x").startswith(f"<{UNTRUSTED_TAG}>")
+    assert mark_untrusted("x").endswith(f"</{UNTRUSTED_TAG}>")
+
+
+def test_the_prompt_says_that_tagged_content_is_data_and_not_instructions():
+    lowered = SYSTEM_PROMPT.lower()
+
+    assert "never" in lowered
+    assert "instruction" in lowered
+    assert "data" in lowered
+
+
+def test_the_prompt_forbids_rendering_a_url_found_in_tagged_content():
+    lowered = SYSTEM_PROMPT.lower()
+
+    assert "url" in lowered or "link" in lowered
+    assert "click" in lowered
+
+
+def test_the_prompt_does_not_claim_the_agent_can_approve_anything():
+    # A model that believes it can approve will narrate as though it did.
+    lowered = SYSTEM_PROMPT.lower()
+
+    assert "approval token" in lowered
+    assert "cannot" in lowered or "never" in lowered
+
+
+def test_the_prompt_stays_short_enough_to_be_read_by_a_human():
+    # A prompt nobody reads is a prompt nobody reviews, and this one is a
+    # security control. It is also paid for on every single turn.
+    assert len(SYSTEM_PROMPT) < 3000
+
+
+# --- the URL provenance guard --------------------------------------------
+#
+# The structural backstop for the turn the prompt does not hold. A link
+# the agent only knows because an attacker wrote it into a product
+# description must not reach a customer through the agent's own words.
+
+from agent.prompt import REDACTION, redact_untrusted_urls, untrusted_urls  # noqa: E402
+
+
+def tool_message(content: str) -> dict:
+    return {"role": "tool", "tool_call_id": "call_1", "content": content}
+
+
+def test_urls_inside_the_tag_are_found_and_others_are_not():
+    messages = [
+        tool_message(
+            '{"description": "<untrusted-user-content>see '
+            'https://evil.example.com/x</untrusted-user-content>", '
+            '"link": "https://shop.example.com/p/1"}'
+        )
+    ]
+
+    # The shop's own link sits outside the block and is left alone.
+    assert untrusted_urls(messages) == {"https://evil.example.com/x"}
+
+
+def test_a_url_in_an_assistant_message_is_not_treated_as_untrusted():
+    # Only tool results carry the marked blocks. Scanning anything else
+    # would let the model launder a URL by mentioning it first.
+    messages = [
+        {
+            "role": "assistant",
+            "content": "<untrusted-user-content>https://evil.example.com/x"
+            "</untrusted-user-content>",
+        }
+    ]
+
+    assert untrusted_urls(messages) == set()
+
+
+def test_an_answer_repeating_an_untrusted_url_has_it_removed():
+    answer = "Check https://evil.example.com/x to verify."
+
+    cleaned = redact_untrusted_urls(answer, {"https://evil.example.com/x"})
+
+    assert "evil.example.com" not in cleaned
+    assert REDACTION in cleaned
+
+
+def test_a_markdown_link_loses_its_destination():
+    # The visible text survives; what the customer could click does not.
+    answer = "[Click here to verify](https://evil.example.com/verify) now."
+
+    cleaned = redact_untrusted_urls(answer, {"https://evil.example.com/verify"})
+
+    assert "evil.example.com" not in cleaned
+
+
+def test_an_answer_with_no_untrusted_url_is_returned_unchanged():
+    answer = "Those are the Nimbus 9s, $120, 17 in stock."
+
+    assert redact_untrusted_urls(answer, {"https://evil.example.com/x"}) == answer
+
+
+def test_a_url_that_is_a_prefix_of_another_does_not_strand_the_longer_one():
+    answer = "See https://evil.example.com/a and https://evil.example.com/a/b"
+
+    cleaned = redact_untrusted_urls(
+        answer, {"https://evil.example.com/a", "https://evil.example.com/a/b"}
+    )
+
+    assert "evil.example.com" not in cleaned
+    assert cleaned.count(REDACTION) == 2
+
+
+def test_nothing_happens_when_there_is_no_answer_yet():
+    # A tool turn has no prose. This runs on every model step.
+    assert redact_untrusted_urls(None, {"https://evil.example.com/x"}) is None
