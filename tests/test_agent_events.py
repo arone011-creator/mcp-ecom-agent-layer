@@ -237,6 +237,121 @@ def test_replay_rejects_a_stream_from_a_future_schema():
         replay([{"v": 2, "seq": 0, "type": "message", "data": {"text": "hi"}}])
 
 
+# --- ordering -------------------------------------------------------------
+#
+# replay() returned three parallel lists and so discarded the order events
+# arrived in. The chat panel rendered every question, then every tool chip,
+# then every answer -- which looks correct for a single exchange and is
+# obviously wrong for two. `timeline` is the ordered view.
+
+
+def test_the_timeline_keeps_prose_and_tools_in_the_order_they_happened():
+    events = [
+        message(0, "Let me look."),
+        tool_started(1, "call_1", "get_orders", {"limit": 3}),
+        tool_completed(2, "call_1", "get_orders", result=[]),
+        message(3, "You ordered ORD-1."),
+    ]
+
+    assert replay(events)["timeline"] == [
+        {"kind": "text", "text": "Let me look."},
+        {"kind": "tool", "call_id": "call_1"},
+        {"kind": "text", "text": "You ordered ORD-1."},
+    ]
+
+
+def test_a_tool_appears_on_the_timeline_once_however_many_events_it_has():
+    # An approved high-risk call emits approval_required, then tool_started,
+    # then tool_completed under ONE call_id. Three items would draw three
+    # cards for one cancellation.
+    events = [
+        approval_required(0, "call_1", "cancel_order", {"order_id": "ord_9"}),
+        tool_started(1, "call_1", "cancel_order", {"order_id": "ord_9"}),
+        tool_completed(2, "call_1", "cancel_order", result={"status": "CANCELLED"}),
+    ]
+
+    assert replay(events)["timeline"] == [{"kind": "tool", "call_id": "call_1"}]
+
+
+def test_the_timeline_names_a_tool_rather_than_embedding_it():
+    # A tool's state changes after it first appears. An embedded snapshot
+    # would be captured as "working" and stay that way forever, so the
+    # timeline carries the id and `tools` carries the state.
+    events = [
+        tool_started(0, "call_1", "get_orders", {"limit": 3}),
+        tool_completed(1, "call_1", "get_orders", result=[{"orderNumber": "ORD-1"}]),
+    ]
+
+    conversation = replay(events)
+
+    assert conversation["timeline"] == [{"kind": "tool", "call_id": "call_1"}]
+    assert conversation["tools"][0]["ok"] is True
+
+
+def test_fragments_become_one_timeline_item_that_the_message_finalises():
+    events = [
+        message_delta("Your most "),
+        message_delta("recent order."),
+        message(0, "Your most recent order."),
+    ]
+
+    assert replay(events)["timeline"] == [
+        {"kind": "text", "text": "Your most recent order."}
+    ]
+
+
+def test_the_finished_message_replaces_the_fragments_in_place():
+    # Position matters as much as content: appended at the end instead, the
+    # answer would jump below a tool chip that came after it.
+    events = [
+        message_delta("Visit https://evil.example.com/x"),
+        tool_started(0, "call_1", "get_orders", {}),
+        message(1, "Visit [link removed]"),
+    ]
+
+    assert replay(events)["timeline"] == [
+        {"kind": "text", "text": "Visit https://evil.example.com/x"},
+        {"kind": "tool", "call_id": "call_1"},
+        {"kind": "text", "text": "Visit [link removed]"},
+    ]
+
+
+def test_a_tool_closes_an_open_run_of_fragments():
+    # Prose is finished once something else happens. Without closing, a
+    # later fragment would be appended to prose from before the tool call.
+    events = [
+        message_delta("Checking"),
+        tool_started(0, "call_1", "get_orders", {}),
+        message_delta("Found it"),
+    ]
+
+    assert replay(events)["timeline"] == [
+        {"kind": "text", "text": "Checking"},
+        {"kind": "tool", "call_id": "call_1"},
+        {"kind": "text", "text": "Found it"},
+    ]
+
+
+def test_a_turn_failure_takes_its_place_in_the_timeline():
+    events = [
+        message(0, "Looking that up."),
+        error(1, "The assistant could not reach the shop.", retryable=True),
+    ]
+
+    assert replay(events)["timeline"] == [
+        {"kind": "text", "text": "Looking that up."},
+        {
+            "kind": "error",
+            "message": "The assistant could not reach the shop.",
+            "retryable": True,
+        },
+    ]
+
+
+def test_an_empty_stream_has_an_empty_timeline():
+    assert replay([])["timeline"] == []
+
+
 # --- emission from the turn loop -----------------------------------------
 
 

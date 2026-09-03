@@ -7,7 +7,9 @@ both sides, which is the point: two prose descriptions of one contract
 drift, one shared artefact does not.
 
 Six types, one envelope, versioned from the first commit because Phase
-3's interrupt payload consumes it too.
+3's interrupt payload consumes it too. replay() returns both the three
+parallel lists callers already use and an ordered `timeline`, which is
+what a chat transcript is rendered from.
 """
 
 from typing import Any
@@ -128,6 +130,14 @@ def replay(events: list[dict[str, Any]]) -> dict[str, Any]:
     # the authoritative message. Held apart from `text` so the message can
     # replace it rather than land beside it as a duplicate.
     pending = ""
+    # The ordered view. text/tools/errors are three parallel lists and so
+    # cannot say what came before what, which is all a transcript is.
+    timeline: list[dict[str, Any]] = []
+    # Index of the text item still being written, or None.
+    open_text: int | None = None
+    # call_ids already placed. One call can emit approval_required,
+    # tool_started AND tool_completed, and it is one thing on screen.
+    charted: set[str] = set()
 
     for event in events:
         if event.get("v") != SCHEMA_VERSION:
@@ -147,6 +157,10 @@ def replay(events: list[dict[str, Any]]) -> dict[str, Any]:
 
         if type_ == "message_delta":
             pending += data["text"]
+            if open_text is None:
+                timeline.append({"kind": "text", "text": ""})
+                open_text = len(timeline) - 1
+            timeline[open_text]["text"] += data["text"]
 
         elif type_ == "message":
             # The message wins. Its text is redacted over the whole answer
@@ -154,8 +168,20 @@ def replay(events: list[dict[str, Any]]) -> dict[str, Any]:
             # when it does, the redacted one is what the customer keeps.
             text.append(data["text"])
             pending = ""
+            if open_text is not None:
+                # In place, so the answer keeps its position relative to
+                # tool calls that came after it.
+                timeline[open_text]["text"] = data["text"]
+                open_text = None
+            else:
+                timeline.append({"kind": "text", "text": data["text"]})
 
         elif type_ in ("tool_started", "approval_required"):
+            open_text = None
+            if data["call_id"] not in charted:
+                charted.add(data["call_id"])
+                timeline.append({"kind": "tool", "call_id": data["call_id"]})
+
             call_id = data["call_id"]
             # One call, not two. An approved high-risk call emits
             # approval_required and then tool_started under the SAME
@@ -177,6 +203,11 @@ def replay(events: list[dict[str, Any]]) -> dict[str, Any]:
         elif type_ == "tool_completed":
             # A completion without its start still records: half a pair is
             # a symptom worth seeing, not one worth swallowing.
+            open_text = None
+            if data["call_id"] not in charted:
+                charted.add(data["call_id"])
+                timeline.append({"kind": "tool", "call_id": data["call_id"]})
+
             call_id = data["call_id"]
             if call_id not in tools:
                 order.append(call_id)
@@ -190,6 +221,8 @@ def replay(events: list[dict[str, Any]]) -> dict[str, Any]:
 
         elif type_ == "error":
             failures.append(data)
+            open_text = None
+            timeline.append({"kind": "error", **data})
 
         # Any other type is ignored on purpose. A newer agent must not be
         # able to crash an older reader.
@@ -207,4 +240,5 @@ def replay(events: list[dict[str, Any]]) -> dict[str, Any]:
         "tools": [tools[call_id] for call_id in order],
         "errors": failures,
         "gaps": [seq for seq in expected if seq not in set(seen)],
+        "timeline": timeline,
     }

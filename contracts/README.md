@@ -8,7 +8,7 @@ Two implementations exist, and neither is the source of truth:
 
 | Where | What it is |
 |---|---|
-| `agent/events.py` (this repo) | The Python emitter and the reference `replay()` reducer. |
+| `agent/events.py` (this repo) | The Python emitter and the reference `replay()` reducer, including the ordered timeline. |
 | `lib/assistant/events.ts` (storefront) | The TypeScript parser and the UI's reducer. |
 | `contracts/assistant-events.v1.json` | The golden stream. **Both** must replay it to the same conversation. |
 
@@ -134,6 +134,29 @@ cart change to invalidate the same query the cart page and header badge already 
 cache key a given tool touches is the storefront's knowledge; the event carries `tool` and
 `ok`, and the storefront maps. An agent shipping cache keys would be this repository
 asserting facts about a UI it cannot see.
+
+## The ordered view
+
+`replay()` also returns `timeline`: the same conversation, in the order it
+happened. The three parallel lists cannot express that, and a chat transcript
+is nothing but ordering — without it a UI renders every question, then every
+tool chip, then every answer, which looks right for one exchange and is wrong
+for two.
+
+    {"kind": "text",  "text": "Your most recent order is ORD-1042."}
+    {"kind": "tool",  "call_id": "call_1"}
+    {"kind": "error", "message": "...", "retryable": true}
+
+A tool is **named, not embedded.** Its state changes after it first appears, so
+an embedded snapshot would be captured as "working" and stay that way; the
+timeline says where it sits and `tools` says what became of it.
+
+One call is one item. A high-risk call emits `approval_required`, then
+`tool_started`, then `tool_completed` under a single `call_id`, and that is one
+thing on screen.
+
+A `message` **replaces its fragments in place** rather than appending, so an
+answer keeps its position relative to tool calls that followed it.
 
 ## Rules a consumer must honour
 

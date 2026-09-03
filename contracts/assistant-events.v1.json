@@ -29,6 +29,15 @@
       {"call_id": "call_4", "tool": "cancel_order", "arguments": {"order_id": "ord_11"}, "ok": true, "result": {"orderId": "ord_11", "status": "CANCELLED"}}
     ],
     "errors": [{"message": "The assistant could not reach the shop.", "retryable": true}],
-    "gaps": []
+    "gaps": [],
+    "timeline": [
+      {"kind": "tool", "call_id": "call_1"},
+      {"kind": "text", "text": "Your most recent order is ORD-1042, still pending."},
+      {"kind": "tool", "call_id": "call_2"},
+      {"kind": "tool", "call_id": "call_3"},
+      {"kind": "tool", "call_id": "call_4"},
+      {"kind": "error", "message": "The assistant could not reach the shop.", "retryable": true},
+      {"kind": "text", "text": "Anything else I can help with?"}
+    ]
   }
 }
