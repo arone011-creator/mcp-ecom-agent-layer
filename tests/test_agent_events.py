@@ -125,6 +125,26 @@ def test_replay_pairs_a_failure_with_its_start():
     assert "Only 17 available" in tool["error"]
 
 
+def test_an_approved_call_appears_once_not_twice():
+    # Found by the live approval gate. approval_required and the
+    # tool_started that follows it carry the SAME call_id -- one call,
+    # approved and then executed -- and replay listed it twice, so a UI
+    # would draw two chips for one cancellation. The golden fixture
+    # missed it because it only held a still-pending approval.
+    events = [
+        approval_required(0, "call_1", "cancel_order", {"order_id": "ord_9"}),
+        tool_started(1, "call_1", "cancel_order", {"order_id": "ord_9"}),
+        tool_completed(2, "call_1", "cancel_order", result={"status": "CANCELLED"}),
+    ]
+
+    tools = replay(events)["tools"]
+
+    assert len(tools) == 1
+    assert tools[0]["ok"] is True
+    # No longer waiting: it was approved and it ran.
+    assert "awaiting_approval" not in tools[0]
+
+
 def test_replay_ignores_an_event_type_it_does_not_know():
     # Forward compatibility in the direction that actually happens: a
     # newer agent deployed against an older UI must not crash it.

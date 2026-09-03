@@ -112,14 +112,22 @@ def replay(events: list[dict[str, Any]]) -> dict[str, Any]:
 
         elif type_ in ("tool_started", "approval_required"):
             call_id = data["call_id"]
-            order.append(call_id)
-            tools[call_id] = {
-                "call_id": call_id,
-                "tool": data["tool"],
-                "arguments": data["arguments"],
-            }
+            # One call, not two. An approved high-risk call emits
+            # approval_required and then tool_started under the SAME
+            # call_id -- listing it twice drew two chips for one
+            # cancellation, which the live approval gate caught.
+            if call_id not in tools:
+                order.append(call_id)
+                tools[call_id] = {
+                    "call_id": call_id,
+                    "tool": data["tool"],
+                    "arguments": data["arguments"],
+                }
             if type_ == "approval_required":
                 tools[call_id]["awaiting_approval"] = True
+            else:
+                # It started, so it is no longer waiting on anyone.
+                tools[call_id].pop("awaiting_approval", None)
 
         elif type_ == "tool_completed":
             # A completion without its start still records: half a pair is
