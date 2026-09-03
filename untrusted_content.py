@@ -39,10 +39,12 @@ def mark_untrusted(text: str | None) -> str | None:
     """Wrap admin/customer-authored free text as an inert data boundary.
 
     Strips control and bidi-override characters, caps length, then wraps
-    the result in a tag Claude is documented to treat as data rather than
-    instructions. Every free-text field that reaches an agent through this
-    server must be run through this -- including reviews, when that
-    creation path ships.
+    the result in an XML-style tag. The tag is inert on its own: it means
+    something only because the agent's system prompt says what it means
+    (agent/prompt.py), and the technique is not specific to any one model
+    -- this agent runs on gpt-4.1 as of M4 Task 2. Every free-text field
+    that reaches an agent through this server must be run through this,
+    including reviews when that creation path ships.
     """
     if text is None:
         return None
