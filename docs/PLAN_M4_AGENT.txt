@@ -578,12 +578,73 @@ TASK 7 - THE EVAL HARNESS    [DONE 2026-09-03]
     print the answer next to every verdict so a human can see when the
     harness is the thing that is wrong.
 
-TASK 8 - DEPLOY AND MEASURE
+TASK 8 - DEPLOY AND MEASURE    [DONE 2026-09-03]
     A third Railway service, or an extension of this one - decide based on
     whether the agent's memory profile fits alongside the MCP server.
     MUST PROVE: the readiness check asserts something ONLY the new
     deployment can satisfy. Twice on this project a deploy was verified
     against the container being replaced.
+
+    THE TASK ASSUMED SOMETHING THAT DID NOT EXIST. "A third service, or
+    an extension of this one" is a decision about a deployable thing, and
+    there was none: server.py served the MCP tools, and agent/ was a
+    library whose entry point was a Python function. No port, no routes.
+    Building agent_server.py was most of this task.
+
+    A THIRD SERVICE, and memory was not the argument. Measured over three
+    hours of production, the mcp service ran at 0.101GB average, 0.187GB
+    peak, against an 8GB limit, at 1% CPU -- the agent would have fitted
+    ten times over. The two real reasons:
+      * only the agent needs OPENAI_API_KEY, and co-locating would put
+        the model key inside the process every customer bearer token
+        reaches;
+      * approvals.py validates in the MCP server and the agent must never
+        mint. Across two processes that is structural; in one it is an
+        import away from being false, guarded only by a test.
+    MCP_APPROVAL_SECRET is deliberately absent from the agent service.
+    Absence is a stronger statement than discipline.
+
+    THE HTTP CONTRACT, agreed here and written into the storefront's Task
+    3. One turn is one SSE stream carrying two kinds of frame:
+        event: assistant   a v1 event; forwarded to the browser
+        event: control     {turn_id, session_id}; the bridge route keeps it
+    That is how the storefront learns which MCP session to mint an
+    approval against (Task 5) without the id entering a stream that
+    reaches a browser (Task 4). SSE separates them at the transport, so
+    the frozen contract did not have to change.
+
+    X-Agent-Key guards /turn and /decision. An open endpoint that calls a
+    paid model is a bill anyone who finds the URL can run up; an absent
+    key means closed, and the process refuses to boot without one.
+
+    MUST PROVE: the readiness check asserts something ONLY the new
+    deployment can satisfy. /health returns the git SHA it was built
+    from, and the check waited for it to equal the commit just pushed:
+
+        expecting sha: 684cb552001e
+        {"ok":true,"sha":"684cb552001e","model":"gpt-4.1"}
+
+    A 200 proves A container is up, not that it is THIS one -- the
+    mistake made twice before on this project.
+
+    Also verified against the deployed service: 401 with no key, 401 with
+    a wrong key, 401 on the decision route with no key, and one real turn
+    end to end, streaming a control frame and then the v1 events.
+
+    CARRIED, not solved:
+      * ONE REPLICA ONLY. A paused turn holds a LangGraph thread
+        (InMemorySaver) AND an open MCP session across two HTTP requests,
+        both in process memory. Same limit approvals.py documents for its
+        spent-nonce set.
+      * THE SERVICE SHOULD BE PRIVATE-NETWORK-ONLY. The storefront calls
+        it server-side and it never needs a public address. It has one
+        because this task's own MUST PROVE cannot be verified against a
+        service nothing can yet reach. Close it once the bridge route
+        exists.
+      * MCP_SERVER_URL points at the public MCP domain, not
+        mcp.railway.internal, because the MCP service sets no explicit
+        PORT and the private port could not be confirmed. Worth revisiting
+        with the private-only change above.
 
     IN PLAIN TERMS
     Nine steps, each ending in a review. The order matters: check the
