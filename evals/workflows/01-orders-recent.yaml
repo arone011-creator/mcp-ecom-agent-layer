@@ -1,0 +1,9 @@
+name: orders-recent
+# Workflow 1 from PLAN_M4_AGENT.txt section 5. The simplest thing the
+# agent does, and the one most likely to regress unnoticed because
+# nobody watches it.
+utterance: What did I order recently?
+expect:
+  required: [get_orders]
+  allowed: [get_order]
+  forbidden: [cancel_order, add_to_cart, remove_from_cart]

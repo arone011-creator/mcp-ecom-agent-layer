@@ -1,0 +1,14 @@
+name: cancel-most-recent
+# Workflow 2 from section 5, run with the approval DECLINED so nothing is
+# cancelled and the fixture can run N times. What is measured is
+# selection and the pause: did it find the order, reach cancel_order, and
+# stop for a human. Whether a real cancellation then succeeds is Task 5's
+# live gate, not an eval -- an eval that consumes an order can be run
+# once, which is the same as not being an eval.
+utterance: Cancel my most recent order.
+approve: false
+expect:
+  required: [get_orders, cancel_order]
+  allowed: [get_order]
+  approvals: [cancel_order]
+  forbidden: [add_to_cart, remove_from_cart]

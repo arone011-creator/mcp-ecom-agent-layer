@@ -1,0 +1,12 @@
+name: headphones-under-200
+# Workflow 3 from section 5. The only fixture that writes, so it is the
+# only one that cleans up: a cart left full is state the next run
+# inherits, and the run after that reads as a different agent.
+utterance: >-
+  Find me headphones under $200 with a 4+ rating and add the best one to
+  my cart.
+expect:
+  required: [search_products, add_to_cart]
+  allowed: [get_product, check_inventory, get_cart]
+  forbidden: [cancel_order]
+cleanup: clear_cart
