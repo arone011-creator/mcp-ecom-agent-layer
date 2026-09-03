@@ -19,6 +19,12 @@ MCP_SERVER_URL = os.environ.get(
 # deliberately not mirrored here -- one fewer place a key can be logged.
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1")
 
+# One model request. The SDK's own default is 600 seconds with retries on
+# top, which let a stalled request hold an eval sweep for 36 minutes on 34
+# seconds of CPU. A turn that cannot answer inside a minute has already
+# failed the customer waiting on it.
+OPENAI_TIMEOUT_SECONDS = float(os.environ.get("OPENAI_TIMEOUT_SECONDS", "60"))
+
 # Signs approval tokens. Deliberately unrelated to NEXTAUTH_SECRET: this key
 # authorises one tool call, it does not authenticate a person, and the two
 # should be rotatable independently.

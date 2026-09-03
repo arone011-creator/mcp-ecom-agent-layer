@@ -275,6 +275,40 @@ def test_tool_accuracy_is_the_share_of_calls_that_were_wanted():
     assert result.tool_accuracy == pytest.approx(2 / 3)
 
 
+def test_a_fixture_can_declare_a_data_precondition(tmp_path):
+    # The first live sweep failed two workflows 0/5, and in both the
+    # agent was right and the fixture was wrong: every order was already
+    # CANCELLED, and no product in the catalogue has a rating. A fixture
+    # that assumes data reports the shop's state as the agent's failure.
+    path = tmp_path / "p.yaml"
+    path.write_text(
+        "name: p\nutterance: hi\nrequires: [cancellable_order]\n", encoding="utf-8"
+    )
+
+    assert load_fixture(path).requires == ["cancellable_order"]
+
+
+def test_an_unknown_precondition_fails_at_load(tmp_path):
+    # A typo would otherwise silently mean "no precondition", which is
+    # the failure mode this whole change exists to remove.
+    path = tmp_path / "p.yaml"
+    path.write_text("name: p\nutterance: hi\nrequires: [nonsense]\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="nonsense"):
+        load_fixture(path)
+
+
+def test_a_skipped_workflow_is_never_reported_as_a_pass():
+    # "Not measured" and "passed" must never look the same. A harness
+    # that quietly drops a workflow still reports a healthy pass rate.
+    from evals.score import skipped_workflow
+
+    entry = skipped_workflow("no cancellable order")
+
+    assert entry["passRate"] is None
+    assert entry["skipped"] == "no cancellable order"
+
+
 def test_a_run_that_called_nothing_is_fully_accurate_rather_than_a_zero():
     # Dividing by zero calls would report 0.0, which reads as a total
     # failure rather than as a turn that correctly needed no tools.

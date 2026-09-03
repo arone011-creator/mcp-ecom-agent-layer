@@ -344,7 +344,11 @@ def openai_model_call(model: str | None = None, on_usage=None) -> ModelCall:
     """
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI()
+    # The SDK defaults to a 600-second timeout and retries, so one stalled
+    # request can hold a turn for half an hour. Observed: an eval sweep sat
+    # for 36 minutes on 34 seconds of CPU. A turn that cannot answer in a
+    # minute has already failed the customer waiting for it.
+    client = AsyncOpenAI(timeout=config.OPENAI_TIMEOUT_SECONDS)
     chosen = model or config.OPENAI_MODEL
 
     async def call(messages: list[dict], tools: list[dict]):

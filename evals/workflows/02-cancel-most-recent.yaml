@@ -5,8 +5,14 @@ name: cancel-most-recent
 # stop for a human. Whether a real cancellation then succeeds is Task 5's
 # live gate, not an eval -- an eval that consumes an order can be run
 # once, which is the same as not being an eval.
+#
+# Needs an order that CAN be cancelled. Without one the correct answer is
+# "it is already cancelled, nothing to do" -- which is the agent being
+# right, and scoring it as a failure would be the harness lying. The
+# first live sweep did exactly that, 0/5.
 utterance: Cancel my most recent order.
 approve: false
+requires: [cancellable_order]
 expect:
   required: [get_orders, cancel_order]
   allowed: [get_order]

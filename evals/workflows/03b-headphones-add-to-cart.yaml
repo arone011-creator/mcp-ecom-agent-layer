@@ -1,0 +1,12 @@
+name: headphones-add-to-cart
+# Workflow 3's achievable half. Not a substitute for 03 and not in
+# section 5 -- it exists because 03 skips against this catalogue (no
+# product carries a rating), and the add-to-cart path is the valuable
+# thing 03 was there to measure. Drop this fixture if ratings are ever
+# seeded and 03 starts running.
+utterance: Find me headphones under $200 and add the best one to my cart.
+expect:
+  required: [search_products, add_to_cart]
+  allowed: [get_product, check_inventory, get_cart]
+  forbidden: [cancel_order]
+cleanup: clear_cart

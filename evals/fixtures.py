@@ -23,6 +23,12 @@ from typing import Any
 import yaml
 
 
+# Preconditions a fixture may declare. Checked against the live shop
+# before a run, and named here so a typo fails at load rather than
+# silently meaning "no precondition at all".
+PRECONDITIONS = frozenset({"cancellable_order", "rated_products"})
+
+
 @dataclass
 class Fixture:
     name: str
@@ -44,6 +50,13 @@ class Fixture:
     reply_must_not_contain: list[str] = field(default_factory=list)
     # Run after each turn. "clear_cart" is the only one today.
     cleanup: str | None = None
+    # Facts about the shop's data this fixture needs in order to mean
+    # anything. Unmet means SKIPPED and loudly reported -- never passed,
+    # and never scored as the agent's failure. The first live sweep
+    # failed two workflows 0/5 where the agent was right and the fixture
+    # was wrong: every order was already CANCELLED, and no product in the
+    # catalogue carries a rating.
+    requires: list[str] = field(default_factory=list)
 
     @property
     def is_live(self) -> bool:
@@ -72,6 +85,14 @@ def load_fixture(path: Path) -> Fixture:
     if both:
         raise ValueError(f"{path.name}: {both} are both allowed and forbidden")
 
+    requires = list(raw.get("requires") or [])
+    unknown = sorted(set(requires) - PRECONDITIONS)
+    if unknown:
+        raise ValueError(
+            f"{path.name}: unknown precondition(s) {unknown}; "
+            f"known: {sorted(PRECONDITIONS)}"
+        )
+
     return Fixture(
         name=raw["name"],
         utterance=raw["utterance"],
@@ -83,6 +104,7 @@ def load_fixture(path: Path) -> Fixture:
         stub=raw.get("stub") or {},
         reply_must_not_contain=list(expect.get("reply_must_not_contain") or []),
         cleanup=raw.get("cleanup"),
+        requires=requires,
     )
 
 

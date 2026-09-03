@@ -34,7 +34,7 @@ from agent.loop import (
 )
 from agent.tools import AGENT_TOOLS, list_openai_tools, to_openai_tool
 from evals.fixtures import Fixture, load_all
-from evals.score import RunResult, score_run
+from evals.score import RunResult, score_run, skipped_workflow
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / "evals" / "workflows"
@@ -107,6 +107,44 @@ STUB_DESCRIPTIONS = {
 }
 
 
+async def unmet_preconditions(fixture: Fixture, token: str) -> str | None:
+    """Why this fixture cannot mean anything against today's data, if so.
+
+    Checked against the live shop rather than assumed. The first sweep
+    reported two workflows as 0/5 where the agent had answered correctly
+    and the shop simply had no cancellable order and no rated product --
+    the harness scoring its own stale assumptions as the agent's failure.
+    """
+    if not fixture.requires:
+        return None
+
+    headers = {"authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(timeout=30) as http:
+        if "cancellable_order" in fixture.requires:
+            response = await http.get(
+                f"{config.ECOMMERCE_API_BASE_URL}/api/v1/orders?limit=20",
+                headers=headers,
+            )
+            orders = response.json()["data"]["orders"]
+            if not any(o["status"] in ("PENDING", "PROCESSING") for o in orders):
+                return (
+                    f"no cancellable order ({len(orders)} orders, all "
+                    f"{sorted({o['status'] for o in orders})})"
+                )
+
+        if "rated_products" in fixture.requires:
+            response = await http.get(
+                f"{config.ECOMMERCE_API_BASE_URL}/api/v1/products?limit=50",
+                headers=headers,
+            )
+            products = response.json()["data"]["products"]
+            if not any(p.get("rating") for p in products):
+                return f"no product carries a rating ({len(products)} checked)"
+
+    return None
+
+
 def percentile(values: list[float], p: float) -> int:
     if not values:
         return 0
@@ -167,10 +205,18 @@ async def clear_cart(token: str) -> None:
 
 
 def tools_of(state) -> list[str]:
+    """Every tool the agent CHOSE to call, gated or not.
+
+    approval_required counts. A high-risk call that paused and was then
+    declined emits no tool_started -- it never started -- but the agent
+    still selected it, and tool selection is the thing being measured.
+    Reading only tool_started scored a correctly-paused cancellation as
+    though the agent had never reached for it.
+    """
     return [
         event["data"]["tool"]
         for event in state["events"]
-        if event["type"] == "tool_started"
+        if event["type"] in ("tool_started", "approval_required")
     ]
 
 
@@ -276,6 +322,13 @@ async def main() -> int:
 
     workflows = {}
     for fixture in fixtures:
+        unmet = await unmet_preconditions(fixture, token)
+        if unmet:
+            print(f"\n===== {fixture.name} =====")
+            print(f"  SKIPPED: {unmet}")
+            workflows[fixture.name] = skipped_workflow(unmet)
+            continue
+
         workflows[fixture.name] = await run_fixture(
             fixture, token, live_tools, args.runs
         )
@@ -293,9 +346,18 @@ async def main() -> int:
     OUTPUT.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"\nwrote {OUTPUT.relative_to(ROOT)}")
 
-    failing = [name for name, w in workflows.items() if w["passRate"] < 1]
+    failing = [
+        name
+        for name, w in workflows.items()
+        if w["passRate"] is not None and w["passRate"] < 1
+    ]
+    skipped = [name for name, w in workflows.items() if w.get("skipped")]
+
     print("\n===== SUMMARY =====")
     for name, w in workflows.items():
+        if w.get("skipped"):
+            print(f"  {name:<38} SKIPPED  {w['skipped']}")
+            continue
         print(
             f"  {name:<38} pass {w['passRate']:.2f}  "
             f"acc {w['toolAccuracy']:.2f}  p50 {w['p50']}ms  "
@@ -304,10 +366,18 @@ async def main() -> int:
 
     if failing:
         print(f"\nBELOW 1.0: {failing}")
-        # A workflow that works four times in five is broken, not slow --
-        # the same call the scorecard makes for an MCP success rate.
-        if args.gate:
-            return 1
+    if skipped:
+        # Surfaced separately and never folded into the pass rate: an
+        # unmeasured workflow is not a passing one, and the whole reason
+        # this distinction exists is that collapsing them lets a harness
+        # report health it never observed.
+        print(f"NOT MEASURED: {skipped}")
+
+    # A workflow that works four times in five is broken, not slow -- the
+    # same call the scorecard makes for an MCP success rate. A workflow
+    # that could not run is also not a pass, so it fails the gate too.
+    if args.gate and (failing or skipped):
+        return 1
 
     return 0
 

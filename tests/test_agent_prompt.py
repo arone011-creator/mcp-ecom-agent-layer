@@ -41,6 +41,17 @@ def test_the_prompt_does_not_claim_the_agent_can_approve_anything():
     assert "cannot" in lowered or "never" in lowered
 
 
+def test_the_prompt_tells_the_agent_to_call_rather_than_ask_in_chat():
+    # Found by the eval harness. The agent was answering "please confirm
+    # you'd like to cancel" in prose instead of calling the tool, which
+    # defeats the point: the approval card exists so the confirmation is
+    # built from the shop's own facts, not from words the model chose.
+    lowered = SYSTEM_PROMPT.lower()
+
+    assert "call the tool" in lowered
+    assert "do not ask them to confirm in the chat" in lowered
+
+
 def test_the_prompt_stays_short_enough_to_be_read_by_a_human():
     # A prompt nobody reads is a prompt nobody reviews, and this one is a
     # security control. It is also paid for on every single turn.

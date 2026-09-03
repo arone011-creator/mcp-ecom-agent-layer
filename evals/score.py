@@ -24,6 +24,25 @@ class RunResult:
     tool_accuracy: float = 1.0
 
 
+def skipped_workflow(reason: str) -> dict:
+    """A workflow that could not be measured, reported as exactly that.
+
+    passRate is None rather than 0.0 or 1.0. Not measured is neither a
+    pass nor the agent's failure, and collapsing it into either is how a
+    harness ends up reporting health it never observed.
+    """
+    return {
+        "passRate": None,
+        "skipped": reason,
+        "toolAccuracy": None,
+        "unexpectedToolCalls": 0,
+        "p50": 0,
+        "p95": 0,
+        "promptTokens": 0,
+        "completionTokens": 0,
+    }
+
+
 def _appears_in_order(required: list[str], called: list[str]) -> bool:
     """Every required tool, in this relative order, others interleaving.
 
