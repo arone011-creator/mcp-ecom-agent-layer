@@ -43,6 +43,7 @@ from agent.events import error as error_event
 from agent.events import message_delta
 from agent.history import UnsafeHistory, exportable_context, sanitise_history
 from agent.loop import openai_model_call, run_turn, session_scoped_executor
+from agent.titles import clean_title, name_conversation
 from agent.tools import AGENT_TOOLS, list_openai_tools
 
 
@@ -329,11 +330,40 @@ async def decision(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+async def title(request: Request) -> JSONResponse:
+    """Name a conversation. One cheap model call, no tools, no session.
+
+    ALWAYS 200 WITH A TITLE OR A NULL, never a 500 on a naming failure.
+    The storefront's fallback is the customer's own first message, which
+    is a perfectly good name -- so every way this can fail is an answer of
+    "no title", not an error the caller has to special-case.
+    """
+    refusal = _check_service_key(request)
+    if refusal is not None:
+        return refusal
+
+    body = await request.json()
+    utterance = (body.get("utterance") or "").strip()
+    if not utterance:
+        return JSONResponse({"error": "An utterance is required"}, status_code=400)
+
+    try:
+        raw = await name_conversation(utterance, (body.get("answer") or "").strip())
+    except Exception:
+        # Logged, never returned. A stack trace means nothing to the
+        # storefront, which keeps the fallback either way.
+        traceback.print_exc()
+        return JSONResponse({"title": None})
+
+    return JSONResponse({"title": clean_title(raw)})
+
+
 app = Starlette(
     routes=[
         Route("/health", health, methods=["GET"]),
         Route("/turn", turn, methods=["POST"]),
         Route("/turn/{turn_id}/decision", decision, methods=["POST"]),
+        Route("/title", title, methods=["POST"]),
     ]
 )
 

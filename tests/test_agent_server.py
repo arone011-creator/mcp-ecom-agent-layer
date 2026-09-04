@@ -594,3 +594,131 @@ def test_a_refused_history_says_nothing_about_what_was_wrong_with_it(monkeypatch
         )
 
     assert "sekrit-marker" not in response.text
+
+
+# --- POST /title ---------------------------------------------------------
+#
+# Phase 4. A cheap, tool-less model call: no MCP session, no customer
+# bearer, no approval surface. It reads two strings and answers one.
+
+import json as _json  # noqa: E402
+
+
+def test_a_title_without_the_service_key_is_refused(monkeypatch):
+    # The same gate as /turn, for the same reason: this spends money.
+    monkeypatch.setattr(config, "AGENT_SERVICE_KEY", "k")
+
+    with TestClient(app) as client:
+        response = client.post("/title", json={"utterance": "hi", "answer": "hello"})
+
+    assert response.status_code == 401
+
+
+def test_a_title_needs_an_utterance(monkeypatch):
+    monkeypatch.setattr(config, "AGENT_SERVICE_KEY", "k")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/title", json={"answer": "hello"}, headers={"x-agent-key": "k"}
+        )
+
+    assert response.status_code == 400
+
+
+def test_a_title_comes_back_cleaned(monkeypatch):
+    monkeypatch.setattr(config, "AGENT_SERVICE_KEY", "k")
+
+    import agent_server
+
+    async def fake_name(utterance, answer):
+        return '"Recent order history."'
+
+    monkeypatch.setattr(agent_server, "name_conversation", fake_name)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/title",
+            json={"utterance": "what did I order?", "answer": "Two orders."},
+            headers={"x-agent-key": "k"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"title": "Recent order history"}
+
+
+def test_a_title_the_model_could_not_produce_is_a_null_not_a_500(monkeypatch):
+    # The storefront treats a null as "keep the fallback". A 500 would be
+    # a failed request it has to special-case; a null is an answer.
+    monkeypatch.setattr(config, "AGENT_SERVICE_KEY", "k")
+
+    import agent_server
+
+    async def fake_name(utterance, answer):
+        return "   "
+
+    monkeypatch.setattr(agent_server, "name_conversation", fake_name)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/title",
+            json={"utterance": "hi", "answer": "hello"},
+            headers={"x-agent-key": "k"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"title": None}
+
+
+def test_a_model_that_falls_over_is_a_null_too(monkeypatch):
+    # A NAME IS NEVER WORTH AN ERROR. The chat already has a usable one.
+    monkeypatch.setattr(config, "AGENT_SERVICE_KEY", "k")
+
+    import agent_server
+
+    async def fake_name(utterance, answer):
+        raise RuntimeError("the model fell over")
+
+    monkeypatch.setattr(agent_server, "name_conversation", fake_name)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/title",
+            json={"utterance": "hi", "answer": "hello"},
+            headers={"x-agent-key": "k"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"title": None}
+
+
+async def test_naming_shows_the_model_both_halves_of_the_exchange(monkeypatch):
+    # The subject of a chat is rarely in the question alone -- "and the
+    # second one?" names nothing.
+    import agent.titles as titles_module
+
+    seen = {}
+
+    class FakeMessage:
+        content = "Recent order history"
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            seen.update(kwargs)
+
+            class R:
+                choices = [type("C", (), {"message": FakeMessage()})()]
+
+            return R()
+
+    class FakeClient:
+        chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+    monkeypatch.setattr(titles_module, "_openai_client", lambda: FakeClient())
+
+    await titles_module.name_conversation("what did I order?", "Two orders.")
+
+    sent = _json.dumps(seen["messages"])
+    assert "what did I order?" in sent
+    assert "Two orders." in sent
+    # And no tools: naming a chat cannot call anything.
+    assert not seen.get("tools")
