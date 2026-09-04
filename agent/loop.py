@@ -35,6 +35,7 @@ import config
 from agent.events import approval_required as approval_required_event
 from agent.events import message as message_event
 from agent.events import tool_completed, tool_started
+from agent.history import sanitise_history
 from agent.prompt import (
     SYSTEM_PROMPT,
     StreamingRedactor,
@@ -67,6 +68,12 @@ class TurnState(TypedDict, total=False):
     # reducer as messages, so a node returns only what it added. The
     # shape is agent/events.py, which the storefront also implements.
     events: Annotated[list[dict], operator.add]
+    # How many messages the turn was SEEDED with -- the system prompt plus
+    # any replayed history. Written once by run_turn and returned by no
+    # node, so it still describes the seed after the graph has appended to
+    # `messages` many times. agent/history.py::exportable_context uses it
+    # to send out only what this turn added.
+    seeded: int
 
 
 def _tool_calls_of(message: dict) -> list[dict]:
@@ -319,6 +326,7 @@ async def run_turn(
     model_call: ModelCall,
     execute_tool: ToolExecutor,
     tools: list[dict] | None = None,
+    history: list[dict] | None = None,
     max_steps: int = 25,
     approve: ApprovalCallback | None = None,
     approval_timeout_seconds: float = 300.0,
@@ -332,6 +340,14 @@ async def run_turn(
     was minted against, and it travels there -- a server-side callback
     argument -- rather than in the event stream, which reaches a browser.
 
+    `history` is the earlier turns of this conversation, replayed by the
+    storefront -- which owns the conversation, because this service holds
+    the model key and must not also hold customer data. It is checked
+    here as well as at the HTTP boundary: a caller inside this process
+    (the eval harness, a future script) never touches the route, and the
+    guarantee that nothing can seed a `system` message from stored data
+    has to hold for them too.
+
     `on_event` receives each event as the graph appends it. Optional: the
     tests and the eval harness read the accumulated state instead. The
     HTTP surface needs them live, because a stream that only arrives once
@@ -340,6 +356,10 @@ async def run_turn(
     """
     app = build_graph(model_call, execute_tool, checkpointer=InMemorySaver())
     published = 0
+
+    # Refused, not filtered, and refused BEFORE the graph is built: a turn
+    # that has already begun cannot un-send a message it was seeded with.
+    replayed = sanitise_history(history)
 
     settings = {
         # A confused agent stops rather than looping. The repeat guard
@@ -356,12 +376,18 @@ async def run_turn(
         {
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
+                # Between the prompt and the new message, in that order.
+                # The prompt stays first whatever the storefront sends,
+                # and the customer's actual question stays last so it is
+                # not read as a continuation of something older.
+                *replayed,
                 {"role": "user", "content": utterance},
             ],
             "tools": tools or [],
             "answer": None,
             "failed": [],
             "events": [],
+            "seeded": 1 + len(replayed),
         },
         settings,
         on_event,
