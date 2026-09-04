@@ -1,6 +1,7 @@
 ================================================================================
 ITERATIONS - mcp-ecom-agent-layer
-How this service was actually built. Phase 1, 29 August 2026.
+How this service was actually built. Phase 1 and the M4 agent,
+4 September 2026.
 ================================================================================
 
 The technical snapshot says what this service IS. This document says how it got
@@ -29,7 +30,8 @@ CONTENTS
      6. What is still not proven
      7. How to replicate this service from scratch
      8. What we would do differently
-     9. What comes next
+     9. Building the agent - what M4 taught
+    10. What comes next
 
 
 ================================================================================
@@ -448,34 +450,110 @@ STEP 10 - RECORD A BASELINE
 
 
 ================================================================================
-9. WHAT COMES NEXT
+9. BUILDING THE AGENT - WHAT M4 TAUGHT
+================================================================================
+
+Phase 1 built the buttons. M4 built the thing that presses them, and every
+lesson below cost something.
+
+FOUR GREEN TESTS DESCRIBED AN SDK THAT DOES NOT EXIST. The first streaming
+model call was tested against a hand-made stand-in for the whole OpenAI
+client, so the SDK's own request validation never ran in any test. Production
+raised "search_products is not strict" on the first tool, before a token was
+read - because the streaming helper auto-parses tool arguments and therefore
+refuses any tool that is not strict, and these schemas come from the MCP
+server and deliberately are not. The seam moved down to the transport:
+httpx.MockTransport now serves the wire format, and everything above it is the
+real library.
+
+A TEST NAMED FOR A CLAIM IT DOES NOT CHECK IS WORSE THAN NO TEST. One was
+called "published as the turn runs, not at the end" and asserted only on
+contents - which look identical whether events arrive one at a time or in a
+single lump at the end. They were arriving in a lump. The test was green
+throughout. It is now named for what it checks, and the timing claim is made
+where it can actually fail.
+
+A STREAM THAT STOPS CLEANLY WITH NOTHING IN IT IS INDISTINGUISHABLE FROM AN
+ASSISTANT WITH NOTHING TO SAY. A turn that raised mid-stream, after the 200
+and the control frame had already gone out, simply ended. The customer saw
+their question and then blank. The event contract had carried an error event
+since the first commit and nothing had ever emitted one. Failure paths do not
+test themselves.
+
+THREE THINGS HAD TO BE TRUE FOR STREAMING TO STREAM, and for a while only two
+were: the event queue, run_turn publishing after each graph step rather than
+at the end, and the model call streaming its prose. Miss any one and the
+customer waits for the whole answer. The first live turn still arrived in one
+lump with two of the three in place.
+
+THE SESSION IDENTITY BUG, THREE TIMES. An approval token is minted against an
+MCP session id, so the session must be the same one the resumed call rides on.
+A session per tool call makes that id different every time. The turn now holds
+exactly one session for its lifetime - which is also why a paused turn holds a
+real server-side resource, and why the approval wait has a deadline at all.
+
+A DEPLOY IS NOT PROVEN BY A 200. /health reports the commit sha it was built
+from, because twice a deploy was verified against the container it was
+replacing.
+
+WHAT PHASE 5 DID NOT NEED TO CHANGE. Adding memory touched no contract, no
+schema and no event type: history rides in the request body, and the turn's
+own transcript leaves on the control channel that already existed to keep the
+MCP session id away from browsers. The single riskiest thing about replay -
+that a stored blob could rewrite the system prompt - is closed by an allowlist
+of the three roles a turn can produce, checked at the route AND inside
+run_turn, because the eval harness never touches the route.
+
+    IN PLAIN TERMS
+    Building the AI taught more about testing than about AI. Tests written
+    against a pretend version of a library describe the pretend version. A
+    test named after something it does not actually check is worse than
+    having no test, because it looks like coverage. And the ways a system
+    fails are exactly the paths nobody exercises - the AI falling over
+    mid-answer showed a customer a blank box, and the warning message built
+    for that case had never once been used.
+
+
+================================================================================
+10. WHAT COMES NEXT
 ================================================================================
 
     PHASE   DELIVERS                                          STATUS
     ------  ------------------------------------------------  -----------
     1       This MCP server. No agent.                        SHIPPED
-    2       One agent, the full toolbox, a chat UI            Not started
+    2       One agent, the full toolbox, a chat UI            SHIPPED
     3       A supervisor plus domain specialists              Not started
 
-Phase 2 already owes three things, all decided during Phase 1:
+Two of the three things Phase 2 owed were delivered. The third was not:
 
-    * A TOKEN REFRESH MECHANISM. Tokens are deliberately short-lived because
-      they cannot be revoked, but a conversation outlives fifteen minutes and
-      this server never sees a password.
+    * A TOKEN REFRESH MECHANISM. Delivered, and better than planned: the
+      storefront mints a fifteen-minute bearer per request, server-side. The
+      browser never holds one at all, so there is nothing to refresh.
 
     * APPROVAL PROMPTS BUILT FROM STRUCTURED ARGUMENTS, NEVER FROM AI PROSE.
-      The gate is only as trustworthy as the text beside the button. If the AI
-      writes that text, an injected product review can write it too.
+      Delivered. The rule now also covers the tool chips, the step list, and
+      the product, order and cart cards added in M4 Task 6.
 
-    * A DESIGN PASS ON PROMPT INJECTION. Product descriptions and reviews are
-      written by strangers and flow into AI context through the harmless-
-      looking tools. Approval tokens close the ACTION path. They do nothing
-      about information leaking out through an innocent search.
+    * A DESIGN PASS ON PROMPT INJECTION. STILL OPEN, and still the most
+      serious item here. Untrusted content is now marked in tool results, and
+      a URL the agent repeats out of an untrusted block is redacted from its
+      answer - including, since Phase 5, one that arrived in an earlier turn
+      of the same conversation. Both are heuristics and honest about it: a
+      paraphrased or reconstructed URL slips past, and exfiltration by
+      rendering through an innocent-looking search is not closed.
+
+WHAT IS LEFT IN M4, tracked in the storefront's PLAN_M4_STOREFRONT.txt: task
+6b (missing information offered as choices from a tool result), task 7 (the
+active context made visible), task 8 (an agent section in the scorecard), and
+chat phase 6 (summarisation, so a long conversation degrades gracefully
+instead of dropping its oldest turns).
 
     IN PLAIN TERMS
-    The controls exist and work. Next comes the AI that uses them. Three
-    safety items are already booked in - the most important being that
-    product reviews are written by the public and read by the AI, and nobody
-    has closed that door yet.
+    The AI is built and working. Two of the three safety items booked in
+    during Phase 1 are done. The third is not: product reviews are written by
+    the public and read by the AI, and while there are now guards against the
+    AI repeating a stranger's link back to a customer, they are rules of
+    thumb rather than a closed door. That is still the thing to solve before
+    this is used for real.
 
 ================================================================================

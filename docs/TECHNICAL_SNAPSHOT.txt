@@ -1,6 +1,7 @@
 ================================================================================
 TECHNICAL SNAPSHOT - mcp-ecom-agent-layer
-As of 29 August 2026. Phase 1 shipped; no agent exists yet.
+As of 4 September 2026. Phase 1 and the M4 agent shipped: two services
+from one codebase.
 ================================================================================
 
 A complete picture of what this service is, what it is built from, and how it
@@ -39,29 +40,49 @@ CONTENTS
 1. WHAT THIS IS
 ================================================================================
 
-An MCP server. MCP - Model Context Protocol - is a standard way to describe
-capabilities ("tools") to an AI client so it can call them.
+TWO SERVICES FROM ONE CODEBASE, deployed as separate processes.
 
-This server exposes nine capabilities from the mcp-ecom storefront:
-https://github.com/arone011-creator/mcp-ecom
+    mcp     An MCP server. MCP - Model Context Protocol - is a standard way
+            to describe capabilities ("tools") to an AI client so it can
+            call them. Exposes nine capabilities from the mcp-ecom
+            storefront, and mints and validates approval tokens.
+    agent   The AI that drives those tools on a customer's behalf, over an
+            SSE stream the storefront's bridge route forwards to a browser.
+
+    Storefront      https://github.com/arone011-creator/mcp-ecom
 
     Language        Python 3.11+ (3.12.7 in development)
-    Framework       FastMCP 2.14.7
+    Framework       FastMCP 2.14.7 (mcp), Starlette (agent)
+    Orchestration   LangGraph, with the OpenAI SDK called directly from a
+                    plain node -- no model-wrapper library in between, so
+                    request parameters stay under this project's control
     HTTP client     httpx 0.28.1
     Validation      Pydantic 2.13.5
-    Tests           pytest + respx - 108 tests
-    Source size     ~920 lines, plus a 263-line sweep script
+    Tests           pytest + respx - 313 tests
     Live at         mcp-production-e344.up.railway.app
+                    agent-production-79c8.up.railway.app
 
-THERE IS NO AI IN THIS REPOSITORY. That is the point of Phase 1: building the
-tools and the reasoning at the same time would confound two unknowns - do my
-tools work, and does my orchestration work. The agent arrives in Phase 2, on
-top of a tool layer already proven.
+TWO PROCESSES, NOT ONE, AND NOT FOR MEMORY (the MCP service runs at 0.1GB of
+an 8GB limit). Two reasons, both structural:
+
+  * only the agent needs OPENAI_API_KEY, and co-locating would put the model
+    key inside the process every customer's bearer token reaches;
+
+  * approvals.py validates in the MCP server and the agent must never mint.
+    Across two processes that is a fact about the deployment. In one it would
+    be an import away from being false, guarded only by a test.
+
+PHASE 1 DELIBERATELY HAD NO AI IN IT. Building the tools and the reasoning at
+the same time would have confounded two unknowns - do my tools work, and does
+my orchestration work. The agent was added in M4, on top of a tool layer
+already proven.
 
     IN PLAIN TERMS
-    This is the set of buttons an AI is allowed to press. The AI itself comes
-    later, on purpose. If you build the buttons and the AI at once and
-    something breaks, you cannot tell which half is at fault.
+    Two programs. One is the set of buttons an AI is allowed to press; the
+    other is the AI that presses them. They are kept apart on purpose: only
+    the second one holds the expensive AI key, and only the FIRST one is
+    allowed to issue the permission slips for risky actions. Keeping them in
+    separate programs makes that impossible to get wrong by accident.
 
 
 ================================================================================
@@ -236,7 +257,21 @@ This server runs streamable HTTP on $PORT, with per-request authentication.
 
     approvals.py              Mint, validate and burn approval tokens (173)
     server.py                 FastMCP app, nine tools, /approvals    (267)
-    config.py                 Environment variables                   (18)
+    agent_server.py           The agent's HTTP surface: /turn (SSE),
+                              /turn/{id}/decision, /title, /health
+    agent/loop.py             One turn as a LangGraph graph: model ->
+                              tools -> model, pausing for approval
+    agent/events.py           The frozen v1 event contract, and replay()
+    agent/prompt.py           System prompt, untrusted-content marking,
+                              and the URL redactor
+    agent/history.py          What may be replayed into a turn, and what
+                              comes out of one (M4 Phase 5)
+    agent/titles.py           Naming a conversation (M4 Phase 4)
+    agent/tools.py            Tool schemas, risk tiers, forbidden arguments
+    contracts/                The golden event fixture both languages
+                              are tested against
+    evals/                    Workflow fixtures and the eval harness
+    config.py                 Environment variables
     clients/ecommerce_api.py  The only thing that speaks HTTP to     (120)
                               /api/v1
     models/schemas.py         Pydantic mirrors of the real shapes    (117)
@@ -246,7 +281,7 @@ This server runs streamable HTTP on $PORT, with per-request authentication.
     tools/cart.py             get_cart, add_to_cart, remove_from_cart
     scripts/sweep.py          Exercises every tool against a live    (263)
                               deployment
-    tests/                    108 tests, one module per source module
+    tests/                    313 tests, one module per source module
 
 THE tools/ SPLIT IS DELIBERATE AND GETS REUSED. In Phase 3 each file becomes
 one specialist agent's toolbox - products.py for a Product agent, and so on. It
@@ -361,18 +396,31 @@ public domain. The fix is a condition in the storefront's middleware.
 11. TESTING
 ================================================================================
 
-108 tests, no network access, one module per source module:
+313 tests, no network access, one module per source module:
 
     MODULE                    TESTS   COVERS
     ------------------------  ------  ---------------------------------------
+    test_agent_events.py         35   The frozen v1 contract and replay(),
+                                      against the golden fixture
+    test_agent_server.py         32   The HTTP surface: streaming, the
+                                      context frame, /title, the refusals
+    test_agent_loop.py           24   The turn as a graph, and replayed
+                                      history
+    test_evals.py                23   The workflow eval harness
+    test_agent_prompt.py         22   Untrusted marking and URL redaction
+    test_approvals.py            21   Every way an approval must fail
     test_server.py               20   Per-request identity, the exposed tool
                                       surface, minting
-    test_approvals.py            16   Every way an approval must fail
+    test_agent_tools.py          20   Schemas, risk tiers, forbidden arguments
+    test_schemas.py              18   The real response shapes
     test_tools_orders.py         16   Order reads, cancellation refusals
     test_tools_cart.py           15   Cart reads, mutations, idempotency keys
-    test_schemas.py              15   The real response shapes
+    test_agent_titles.py         13   What a conversation name may contain
+    test_agent_history.py        13   What may be replayed in, what goes out
+    test_agent_approval.py       13   The pause, the resume, the deadline
     test_ecommerce_api.py        12   Envelope, errors, headers
     test_tools_products.py        9   Search filters, inventory
+    test_untrusted_content.py     7   Marking text nobody here wrote
 
 HTTP is mocked with respx. EVERY IMPORTANT BEHAVIOUR WAS VERIFIED BY MUTATION -
 deliberately breaking the code to confirm the tests notice. The security tests
@@ -411,7 +459,9 @@ cancellation while all 19 unit tests passed.
 
 SHIPPED
     All nine tools live and callable; the high-risk refusal enforced in
-    production.
+    production. The agent is live too: streaming turns, human approval for
+    cancel_order, replayed conversation history under a token budget, and
+    conversation naming.
 
 VERIFIED AGAINST PRODUCTION
     All nine tools. search_products, get_product and check_inventory were
@@ -436,6 +486,23 @@ KNOWN LIMITS, EACH REAL
   * SIGN-IN TOKENS CANNOT BE REVOKED. Short lifetimes bound the exposure;
     nothing removes it.
 
+  * THE AGENT IS SINGLE-REPLICA BY CONSTRUCTION. Paused turns live in a
+    process-memory registry and LangGraph's checkpointer is InMemorySaver.
+    A second replica would lose approvals mid-flight.
+
+  * THE AGENT SERVICE IS PUBLICLY REACHABLE, guarded only by
+    AGENT_SERVICE_KEY. It should be private-network-only.
+
+  * A PAUSED TURN HOLDS AN MCP SESSION OPEN. That is why the approval wait
+    has a deadline at all: the timeout bounds a real server-side resource,
+    not merely an idle task.
+
+  * REPLAYED HISTORY IS TRUSTED ONLY AS FAR AS ITS ROLES. sanitise_history
+    accepts exactly the three roles a turn can produce and refuses the
+    request otherwise -- an allowlist, because the API already has a second
+    role with system authority (`developer`) that any denylist would miss.
+    It does NOT inspect message content; content is data either way.
+
     IN PLAIN TERMS
     All of it is now proven against the real, live shop, not just a
     simulation. The most serious open issue left: product reviews are
@@ -451,20 +518,43 @@ KNOWN LIMITS, EACH REAL
     PHASE   DELIVERS                                            STATUS
     ------  --------------------------------------------------  -----------
     1       This MCP server. No agent.                          SHIPPED
-    2       One agent, the full toolbox, a chat UI with          Not started
-            approval prompts
+    2       One agent, the full toolbox, a chat UI with          SHIPPED
+            approval prompts                                    (M4 1-6)
     3       A supervisor agent coordinating product / order /    Not started
             cart specialists
 
-Phase 2 already owes two things, both decided during Phase 1:
+Both things Phase 2 owed were delivered, and both held up:
 
-  * A TOKEN REFRESH MECHANISM. Sign-in tokens are deliberately short-lived
-    because they cannot be revoked, but a conversation outlives fifteen minutes
-    and this server never sees a password.
+  * A TOKEN REFRESH MECHANISM. The storefront's bridge route mints a
+    fifteen-minute bearer server-side per request and throws it away. The
+    browser never holds one at all, so "refresh" is just "mint another".
 
   * APPROVAL PROMPTS RENDERED FROM STRUCTURED ARGUMENTS, NEVER FROM AI PROSE.
-    The confirmation gate is only as trustworthy as the text beside the button;
-    if the AI writes that text, an injected review can write it too.
+    The card is built from a fresh server-side lookup of what the action
+    affects. The same rule now covers the tool chips, the step list and the
+    product/order/cart cards.
+
+STILL OPEN IN M4, IN THE STOREFRONT'S PLAN (docs/PLAN_M4_STOREFRONT.txt):
+
+    6b      Missing information offered as selectable choices sourced
+            from a tool result -- never "please provide your order ID".
+            Task 6's "Choose another" recovery action is deferred here,
+            because alternatives can only honestly come from a tool result.
+    7       The active context made VISIBLE. Phase 5's memory already
+            resolves "the second order" without a repeated id; what is
+            left is showing what the assistant thinks the context is.
+    8       An `agent` section in the storefront scorecard - workflow pass
+            rate, turn latency, tokens per workflow. The file shape is
+            settled: metrics/agent-evals.json.
+
+AND ONE CHAT PHASE REMAINS (see the storefront's chat-persistence roadmap):
+
+    6       Summarisation. Today a conversation that exceeds the replay
+            budget loses its oldest turns abruptly, with nothing in their
+            place. A summary must be replayed as ASSISTANT content, never
+            as a system message, and must not be able to cross the approval
+            boundary -- a summary claiming a cancellation was authorised
+            still cannot cancel anything without a token minted here.
 
 The design documents for all three phases live in the storefront repository:
 https://github.com/arone011-creator/mcp-ecom/tree/main/docs/mcp
