@@ -41,6 +41,7 @@ from agent.events import OUT_OF_BAND
 from agent.events import approval_required as approval_required_event
 from agent.events import error as error_event
 from agent.events import message_delta
+from agent.history import UnsafeHistory, exportable_context, sanitise_history
 from agent.loop import openai_model_call, run_turn, session_scoped_executor
 from agent.tools import AGENT_TOOLS, list_openai_tools
 
@@ -162,14 +163,26 @@ async def turn(request: Request):
     if not utterance:
         return JSONResponse({"error": "An utterance is required"}, status_code=400)
 
+    # Checked HERE, before the response opens. Once the stream has begun
+    # the status is already 200 and a refusal can only arrive as an error
+    # event -- which is a worse answer to a request that was refusable
+    # before a single token was spent.
+    try:
+        history = sanitise_history(body.get("history"))
+    except UnsafeHistory:
+        # Deliberately says nothing about which message or which role. The
+        # value came out of the storefront's database, and echoing it back
+        # describes that database to whoever is probing it.
+        return JSONResponse({"error": "Replayed history was refused"}, status_code=400)
+
     return StreamingResponse(
-        _stream_turn(utterance, token),
+        _stream_turn(utterance, token, history=history),
         media_type="text/event-stream",
         headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
     )
 
 
-async def _stream_turn(utterance: str, token: str):
+async def _stream_turn(utterance: str, token: str, history: list[dict] | None = None):
     """One turn, as it happens.
 
     Events are published to a queue as the graph appends them rather than
@@ -182,6 +195,13 @@ async def _stream_turn(utterance: str, token: str):
     one lump: this queue, run_turn publishing after each graph step
     rather than at the end, and the model call streaming its prose. Miss
     any one and the customer waits for the whole answer.
+
+    The stream ends with a SECOND control frame carrying this turn's own
+    messages, for the storefront to store against the conversation. It
+    rides `control` and not `assistant` for the same reason the session id
+    does: `assistant` is forwarded to the browser by exclusion, and the
+    model transcript is not the browser's -- either to read or to send
+    back.
     """
     queue: asyncio.Queue = asyncio.Queue()
     tools = await list_openai_tools(token, only=AGENT_TOOLS)
@@ -224,6 +244,7 @@ async def _stream_turn(utterance: str, token: str):
                     model_call=openai_model_call(on_delta=on_delta),
                     execute_tool=session.execute,
                     tools=tools,
+                    history=history,
                     approve=approve,
                     session_id=session.session_id,
                     on_event=queue.put_nowait,
@@ -261,11 +282,21 @@ async def _stream_turn(utterance: str, token: str):
                     break
                 yield _frame("assistant", event)
 
-            # Awaited for cancellation and cleanup only. drive() swallows
-            # the failure deliberately, having already reported it as an
-            # event -- raising here would abort the stream a moment after
-            # telling the customer what went wrong.
-            await task
+            # Awaited for cancellation and cleanup, and now for the return
+            # value too. drive() swallows the failure deliberately, having
+            # already reported it as an event -- raising here would abort
+            # the stream a moment after telling the customer what went
+            # wrong.
+            state = await task
+
+            # A turn that died answers None, and hands back nothing: its
+            # messages may hold a tool_call nothing answered, which is a
+            # shape the API refuses on the way back in. Storing that would
+            # break every LATER turn of this conversation, not just this
+            # one. No frame means the bridge stores null, and replay
+            # starts after it.
+            if state is not None:
+                yield _frame("control", {"context": exportable_context(state)})
         finally:
             # An aborted stream must not leave the turn registered, or the
             # registry only ever grows.
