@@ -899,3 +899,36 @@ Workflow pass rate becomes a scorecard gate in the storefront's Task 8.
     in-process callers.
 
 ================================================================================
+
+  2026-09-04 -- CHAT PHASE 4: NAMING A CONVERSATION
+
+    POST /title. One cheap model call, no tools, no MCP session, no
+    customer bearer -- naming is a text task, and giving this endpoint
+    tools would put a second, quieter path to the customer's orders
+    beside the one the approval design guards.
+
+    BOTH HALVES OF THE EXCHANGE go to the model. The subject of a chat is
+    often not in the question: "and the second one?" names nothing on its
+    own, and an opening question is frequently that vague.
+
+    agent/titles.py::clean_title is the part worth reading. A name is
+    model-written text derived from an exchange that may have carried
+    untrusted product copy, and it is rendered in a list, a browser tab
+    and a log line rather than in a message bubble. So: no URLs, no
+    control characters, one line, capped at 60 -- the same width the
+    storefront truncates a fallback at. None on anything doubtful,
+    because the storefront's fallback is the customer's own words and
+    beats a mangled model answer.
+
+    ALWAYS 200, NEVER A 500. A title or a null. Every way this can fail
+    is an answer of "no title", not an error the storefront has to
+    special-case -- it keeps the fallback either way.
+
+    Mutation-tested on this side: the URL strip, caught by four tests.
+
+    VERIFIED LIVE 2026-09-04 on deploy 6ca2050 (/health sha
+    6ca2050bc1d4), through the storefront: "do you sell any laptops?"
+    came back named "Available laptops for sale", and a second turn in
+    the same chat asked for no second name.
+
+================================================================================
