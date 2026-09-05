@@ -523,6 +523,68 @@ KNOWN LIMITS, EACH REAL
     used for real.
 
 
+THE MULTI-AGENT MODE (2026-09-05, OFF BY DEFAULT)
+
+A second architecture ships alongside the first, chosen by AGENT_MODE:
+
+    single (default)  one agent holding all nine tools -- the path that is
+                      verified live and serving the demo today
+    team              a supervisor holding NO shop tools, delegating to
+                      three specialists that hold three each
+
+    agent/team.py         the declaration: who exists, what each does,
+                          which tools each may touch. THE ONE FILE YOU
+                          CHANGE to move this pattern to another domain
+    agent/delegation.py   that team, turned into OpenAI function schemas
+    agent/team_graph.py   the supervisor graph and the delegate node
+    agent/tools.py        restricted_executor, the enforced tool boundary
+
+Four things about it are deliberate:
+
+  * DELEGATION IS AN ORDINARY TOOL CALL. The supervisor's tools ARE the
+    specialists, so a hand-off arrives as tool_started/tool_completed --
+    events the frozen contract already carries and the storefront already
+    renders. Inventing a delegation event would have meant changing a
+    contract that lives in two languages with a golden fixture between
+    them. The storefront needed no change beyond naming the chips.
+
+  * A SPECIALIST IS build_graph() UNCHANGED, with a shorter tool list and
+    its own prompt. The repeat guard, the forbidden-argument check and the
+    approval interrupt are the same code at both levels rather than a
+    second implementation written for delegation.
+
+  * THE TOOL RESTRICTION IS ENFORCED, NOT IMPLIED. Leaving cancel_order out
+    of the product specialist's schema makes it unlikely to be called;
+    restricted_executor makes it impossible. That matters for exactly one
+    agent -- the product specialist is the one reading text written by
+    strangers.
+
+  * EVENTS ARE NUMBERED FROM A BASE, NOT A SHARED COUNTER. A specialist
+    keeps its own state and its own empty event list. seq_base offsets it
+    into the supervisor's stream, and stays DERIVED from state rather than
+    counted -- which is what makes a node re-run after an approval pause
+    produce the same numbers twice.
+
+NOT VERIFIED LIVE. Everything above is the local suite (352 tests), a
+mutation run, and a spike proving interrupt() survives a subgraph. The two
+limits that follow say what that leaves open.
+
+
+MULTI-AGENT MODE IS BUILT BUT UNPROVEN AGAINST A REAL MODEL. AGENT_MODE=team
+is unit-tested with a SCRIPTED model, which proves the mechanism -- the right
+specialist runs, events come out in one unbroken sequence, the approval pause
+crosses the subgraph boundary in both directions -- and proves nothing about
+whether the model routes sensibly. Routing quality belongs in M4 Task 8's
+metrics/agent-evals.json, which is not built. The deployed service runs
+AGENT_MODE=single.
+
+A SPECIALIST HAS NO MEMORY OF ITS OWN, turn to turn. Only the supervisor's
+transcript is stored and replayed, so a specialist starts every delegation
+from its own prompt and the request it was handed. Deliberate: it keeps the
+stored shape exactly what the storefront already handles, at the cost of a
+specialist being unable to remember what it said last time.
+
+
 ================================================================================
 13. WHAT COMES NEXT
 ================================================================================
@@ -532,8 +594,9 @@ KNOWN LIMITS, EACH REAL
     1       This MCP server. No agent.                          SHIPPED
     2       One agent, the full toolbox, a chat UI with          SHIPPED
             approval prompts                                    (M4 1-6)
-    3       A supervisor agent coordinating product / order /    Not started
-            cart specialists
+    3       A supervisor agent coordinating product / order /    BUILT, OFF
+            cart specialists                                    by default
+                                                                (see above)
 
 Both things Phase 2 owed were delivered, and both held up:
 

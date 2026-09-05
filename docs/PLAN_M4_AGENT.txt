@@ -931,4 +931,102 @@ Workflow pass rate becomes a scorecard gate in the storefront's Task 8.
     came back named "Available laptops for sale", and a second turn in
     the same chat asked for no second name.
 
+  2026-09-05 -- PHASE 3: A SUPERVISOR AND THREE SPECIALISTS (commits
+  42b2e2e..2ce7b86, AGENT_MODE=single still)
+
+    One agent holding nine tools became a supervisor holding NONE, plus
+    a product, an order and a cart specialist holding three each. Both
+    architectures ship; AGENT_MODE picks. It defaults to single because
+    that path is verified live and serving the demo, and a routing
+    mistake should not take a working demo down.
+
+    THE RISK WAS SETTLED BEFORE ANYTHING WAS BUILT. The whole design
+    rests on interrupt() escaping a subgraph and Command(resume=...)
+    finding its way back down, because a specialist runs as a subgraph
+    and cancel_order pauses for a human. If that were untrue the
+    approval boundary would be gone, and gone SILENTLY -- the cancel
+    would simply never pause. Task 0 of the plan was a spike proving it,
+    with a written fallback (hoist cancel_order to the supervisor) and
+    an instruction to stop rather than continue. It passed, and the
+    parent node re-runs exactly twice, which is why the delegate node
+    derives its event numbers from state rather than counting them. The
+    spike stayed in the suite: a LangGraph upgrade that changes this
+    now fails there rather than in front of a customer.
+
+    ONE DELEGATE NODE, NOT ONE PER SPECIALIST. The plan changed on this
+    point while it was being written. Two specialists named in the same
+    assistant message would be two parallel nodes writing to one state,
+    and their event numbering would have to be reconciled afterwards.
+    Handling every delegation in one node, in order, makes the
+    arithmetic trivially correct rather than merely careful.
+
+    THE STOREFRONT NEEDED NO CHANGE. Delegation is emitted as an
+    ordinary tool_started/tool_completed pair, so the frozen event
+    contract -- which lives in two languages with a golden fixture
+    between them -- was not touched, and replay() and the chips already
+    handled it. The only storefront commit is three lines naming the
+    specialists in the activity chips, and a test pinning the FALLBACK
+    that made the change unnecessary in the first place.
+
+    MUTATION-TESTED: 11 applied, 11 caught, but only after two survivors
+    were investigated rather than shrugged at, and one of them was a
+    real hole.
+
+    First pass, 9 applied, 7 caught: tool restriction becomes a
+    suggestion (2 failures), specialist events restart at zero (1),
+    tool_completed lands on the specialist's last event (1), unknown
+    AGENT_MODE falls back instead of refusing (2), supervisor handed
+    the shop tools (1), seq_base ignored (3), specialists sharing tools
+    (1).
+
+    M3 SURVIVED -- a specialist seeded with a blank system message.
+    That is an agent reading attacker-written product text with no
+    untrusted-content boundary at all, and nothing asserted which prompt
+    a specialist starts with. Test added; caught.
+
+    M5 SURVIVED, AND THE REASON WAS THE FINDING. The supervisor's URL
+    redaction could never have fired. untrusted_urls() reads a state's
+    own TOOL RESULTS, and the supervisor never sees one -- the delegate
+    node hands it the specialist's finished answer. There was nothing in
+    its transcript to match against, so the line had always been dead.
+    A test written merely to "cover" that line would have passed against
+    code doing nothing. Fixed by carrying the URLs the specialist
+    actually read up to the supervisor as DATA, never as text:
+    re-injecting the untrusted block into the supervisor's messages
+    would have handed the attacker a second reader rather than protected
+    the first. Re-aimed as M5, M5b (the union narrowed back to the
+    supervisor's own messages) and M5c (the delegate stops carrying them
+    up); all three caught.
+
+    A MUTATION THAT NO LONGER APPLIES IS NOT A MUTATION THAT PASSED.
+    After that fix, M5's original target string no longer existed and
+    the runner refused it -- "MATCHED 0 TIMES, not applied" -- rather
+    than reporting a clean run indistinguishable from a caught mutation.
+    That guard was added to this project after two meaningless results,
+    and this is the run where it paid for itself.
+
+    VERIFIED LIVE 2026-09-05 on deploy 2ce7b86 (/health sha
+    2ce7b8664995): signed in as the demo customer, "do you sell any
+    laptops?" produced a "Searching products - done" chip and an answer
+    naming the MacBook Air M2 at $1,199.99. That is the SINGLE-agent
+    path, and it is the point of the check -- the refactor touched the
+    tool-listing code on every turn, so a regression there would have
+    been silent until somebody chatted.
+
+    NOT VERIFIED LIVE: the team path itself. AGENT_MODE=team has never
+    run against the real model. Everything asserted about routing uses a
+    SCRIPTED model, which proves the mechanism -- the right specialist
+    runs, events come out in one unbroken sequence, the approval pause
+    crosses the subgraph boundary in both directions and a declined one
+    changes nothing -- and proves nothing about the model's judgement.
+    Routing quality belongs in M4 Task 8's metrics/agent-evals.json,
+    which is not built. Turning it on is a Railway variable, which is
+    the operator's to set.
+
+    A SPECIALIST HAS NO MEMORY OF ITS OWN, turn to turn. Only the
+    supervisor's transcript is stored and replayed, so a specialist
+    starts every delegation from its own prompt and the request it was
+    handed. That is a real limitation and a deliberate trade: it keeps
+    the stored shape exactly what the storefront already handles.
+
 ================================================================================

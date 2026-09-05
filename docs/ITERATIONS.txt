@@ -31,7 +31,8 @@ CONTENTS
      7. How to replicate this service from scratch
      8. What we would do differently
      9. Building the agent - what M4 taught
-    10. What comes next
+    10. What the multi-agent split taught
+    11. What comes next
 
 
 ================================================================================
@@ -515,14 +516,73 @@ run_turn, because the eval harness never touches the route.
 
 
 ================================================================================
-10. WHAT COMES NEXT
+10. WHAT THE MULTI-AGENT SPLIT TAUGHT
+================================================================================
+
+One agent holding nine tools became a supervisor holding none, plus three
+specialists holding three each. Four lessons, and only one of them is
+about agents.
+
+THE RISK THAT COULD SINK IT WAS SETTLED FIRST, IN ONE FILE, BEFORE
+ANYTHING ELSE. The whole design rests on interrupt() escaping a subgraph
+and Command(resume=...) finding its way back down. If that were untrue
+the approval boundary in front of cancel_order would be gone, and gone
+SILENTLY -- the cancel would simply never pause. So Task 0 of the plan
+was a twenty-line spike proving it, with a written fallback if it failed
+and an instruction to stop rather than continue. It passed, and the spike
+stayed in the suite instead of being thrown away, so a LangGraph upgrade
+that changes the behaviour fails there rather than in front of a
+customer.
+
+A MUTATION FOUND A SECURITY CONTROL THAT COULD NEVER HAVE FIRED. The
+supervisor redacts URLs the agent might repeat out of untrusted content.
+Deleting that line broke no test -- and investigating why, rather than
+adding a test to cover it, was the whole value. untrusted_urls() reads a
+state's own TOOL RESULTS, and the supervisor never sees one: the delegate
+node hands it the specialist's finished answer. There was nothing in its
+transcript to match on. The line had always been dead. The fix carries
+the URLs the specialist actually read up to the supervisor as DATA, never
+as text -- putting the untrusted block back into the supervisor's
+messages would have handed the attacker a second reader rather than
+protected the first. A test that had been written to "cover" the line
+would have passed against code that did nothing.
+
+A MUTATION THAT NO LONGER APPLIES IS NOT A MUTATION THAT PASSED. After
+that fix, the original M5 string no longer existed in the file. The
+runner refused it -- "MATCHED 0 TIMES, not applied" -- instead of
+reporting a clean test run indistinguishable from a caught mutation.
+That guard was added to this project after two meaningless results, and
+this is the run where it paid for itself. The mutation was re-aimed at
+the fixed code as three separate ones, and all three were caught.
+
+ABSENCE FROM A SCHEMA IS NOT A BOUNDARY. Leaving cancel_order out of the
+product specialist's tool list makes the model UNLIKELY to call it. The
+security claim being made is that it CANNOT, and the product specialist
+is precisely the agent that reads product descriptions and reviews --
+text written by strangers. So the restriction is enforced in code by a
+wrapper that raises before the executor is reached, and ToolError
+specifically, so a specialist reaching too far becomes a recoverable step
+rather than a dead conversation.
+
+    IN PLAIN TERMS
+    Before building on an assumption, spend twenty minutes proving it,
+    and keep the proof. When you deliberately break your own code and
+    nothing complains, the interesting question is not "which test is
+    missing" but "was that code doing anything at all" -- here it was
+    not, and only breaking it revealed that. And a rule enforced by
+    hoping the model does not notice a tool is not a rule.
+
+
+================================================================================
+11. WHAT COMES NEXT
 ================================================================================
 
     PHASE   DELIVERS                                          STATUS
     ------  ------------------------------------------------  -----------
     1       This MCP server. No agent.                        SHIPPED
     2       One agent, the full toolbox, a chat UI            SHIPPED
-    3       A supervisor plus domain specialists              Not started
+    3       A supervisor plus domain specialists              BUILT, OFF
+                                                              by default
 
 Two of the three things Phase 2 owed were delivered. The third was not:
 
