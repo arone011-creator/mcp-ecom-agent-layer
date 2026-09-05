@@ -18,6 +18,7 @@ are the point of this module:
 from typing import Any, Iterable
 
 from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.exceptions import ToolError
 from mcp.types import Tool
 from openai.types.chat import ChatCompletionToolParam
 
@@ -200,3 +201,30 @@ async def list_openai_tools(
 
     async with Client(transport) as client:
         return translate_tools(await client.list_tools(), only=only)
+
+
+def restricted_executor(execute_tool, allowed: frozenset[str]):
+    """Wrap an executor so it can only run this specialist's own tools.
+
+    NOT REDUNDANT WITH LEAVING THE TOOL OUT OF THE SCHEMA. A tool the
+    model was never shown is one it is unlikely to call; this is what
+    makes it one it cannot call. The difference matters because the
+    product specialist reads text written by strangers, and "unlikely"
+    is not a security property.
+
+    ToolError rather than a bespoke exception, so the refusal travels the
+    path execute_tools already has for a failed call: reported to the
+    model, visible as a completed-with-error chip, turn survives. Anything
+    else would escape that except clause and kill the turn.
+    """
+
+    async def execute(name: str, arguments: dict):
+        if name not in allowed:
+            raise ToolError(
+                f"{name} is not available to this specialist. "
+                "Report what you cannot do rather than trying another tool."
+            )
+
+        return await execute_tool(name, arguments)
+
+    return execute

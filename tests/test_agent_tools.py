@@ -235,3 +235,68 @@ def test_the_agent_surface_translates_to_all_nine_tools():
 
     assert len(translated) == 9
     assert "cancel_order" in {t["function"]["name"] for t in translated}
+
+
+# --- A specialist's tool restriction (multi-agent Phase 3) -----------------
+
+from fastmcp.exceptions import ToolError  # noqa: E402
+
+from agent.tools import restricted_executor  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_an_allowed_tool_passes_straight_through():
+    calls = []
+
+    async def execute(name, arguments):
+        calls.append((name, arguments))
+        return {"ok": True}
+
+    restricted = restricted_executor(execute, frozenset({"search_products"}))
+    result = await restricted("search_products", {"query": "laptop"})
+
+    assert result == {"ok": True}
+    assert calls == [("search_products", {"query": "laptop"})]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_outside_the_set_is_refused_before_it_runs():
+    """THE SECURITY MUST PROVE.
+
+    The product specialist reads product descriptions and reviews, which
+    are written by strangers. If an injection ever talks it into calling
+    cancel_order, the call must not reach the executor -- not merely be
+    unlikely because the schema did not mention it. Absence from a schema
+    is a hint to a model; this is a boundary.
+    """
+    reached = []
+
+    async def execute(name, arguments):
+        reached.append(name)
+        return {"ok": True}
+
+    restricted = restricted_executor(execute, frozenset({"search_products"}))
+
+    with pytest.raises(ToolError) as refusal:
+        await restricted("cancel_order", {"order_id": "x"})
+
+    assert reached == []
+    assert "cancel_order" in str(refusal.value)
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_reads_as_a_tool_failure_the_agent_can_act_on():
+    """ToolError, so the loop's existing handling reports it and carries on.
+
+    Raising something else would escape execute_tools' except clause and
+    kill the turn, which turns a specialist reaching too far into a dead
+    conversation instead of a recoverable step.
+    """
+
+    async def execute(name, arguments):
+        return {"ok": True}
+
+    restricted = restricted_executor(execute, frozenset({"get_cart"}))
+
+    with pytest.raises(ToolError):
+        await restricted("add_to_cart", {})
