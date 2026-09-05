@@ -88,6 +88,15 @@ class TurnState(TypedDict, total=False):
     # tools opens an MCP connection, and doing that inside the graph would
     # put a network round trip in the middle of every hand-off.
     specialist_tools: dict[str, list[dict]]
+    # Every URL a SPECIALIST read out of untrusted content, carried up to
+    # the supervisor.
+    #
+    # Without this the supervisor's redaction backstop is inert, and a
+    # mutation run proved it: the supervisor is handed the specialist's
+    # finished answer, never the raw tool result, so untrusted_urls() over
+    # its own messages finds nothing to match. Defence in depth that
+    # cannot fire is not defence in depth.
+    untrusted_seen: Annotated[list[str], operator.add]
 
 
 def _tool_calls_of(message: dict) -> list[dict]:

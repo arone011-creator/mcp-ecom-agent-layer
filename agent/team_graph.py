@@ -72,12 +72,17 @@ def build_team_graph(model_call, execute_tool, checkpointer=None):
         dumped = message.model_dump(exclude_none=True)
         dumped.setdefault("role", "assistant")
 
-        # The same backstop the single agent has. It matters MORE here:
-        # the supervisor never reads a product description itself, so its
-        # untrusted content arrives second-hand through a specialist's
-        # answer, and a rule applied only one level down would miss it.
+        # The same backstop the single agent has, over a UNION rather than
+        # over this state's messages alone -- and that difference is the
+        # whole of it. The supervisor never reads a product description
+        # itself; the delegate node hands it the specialist's finished
+        # answer, so untrusted_urls() over its own transcript finds
+        # nothing. A mutation run proved that: deleting this line broke no
+        # test, because as written over one state it could never fire.
         answer = redact_untrusted_urls(
-            message.content, untrusted_urls(state["messages"])
+            message.content,
+            untrusted_urls(state["messages"])
+            | set(state.get("untrusted_seen", [])),
         )
         dumped["content"] = answer
 
@@ -92,6 +97,8 @@ def build_team_graph(model_call, execute_tool, checkpointer=None):
 
         messages = []
         events = []
+        # What the specialist read that the supervisor never will.
+        seen: set[str] = set()
 
         for call_id, tool_name, request in requests:
             member = member_for_tool(tool_name)
@@ -133,6 +140,13 @@ def build_team_graph(model_call, execute_tool, checkpointer=None):
                 config={"recursion_limit": SPECIALIST_MAX_STEPS},
             )
 
+            # READ FROM THE SPECIALIST'S OWN TRANSCRIPT, which is the only
+            # place the raw tool result exists. Carried up as data, never
+            # as text: putting the untrusted block itself into the
+            # supervisor's messages would hand the attacker a second
+            # reader rather than protect the first.
+            seen |= untrusted_urls(result.get("messages", []))
+
             sub_events = result.get("events", [])
             answer = result.get("answer") or (
                 "The specialist finished without an answer."
@@ -149,7 +163,11 @@ def build_team_graph(model_call, execute_tool, checkpointer=None):
             )
             messages.append(_tool_message(call_id, {"answer": answer}))
 
-        return {"messages": messages, "events": events}
+        return {
+            "messages": messages,
+            "events": events,
+            "untrusted_seen": sorted(seen),
+        }
 
     def route(state: TurnState) -> str:
         return "delegate" if _delegations(state["messages"][-1]) else END
