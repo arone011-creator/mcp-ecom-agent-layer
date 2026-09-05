@@ -1013,15 +1013,65 @@ Workflow pass rate becomes a scorecard gate in the storefront's Task 8.
     tool-listing code on every turn, so a regression there would have
     been silent until somebody chatted.
 
-    NOT VERIFIED LIVE: the team path itself. AGENT_MODE=team has never
-    run against the real model. Everything asserted about routing uses a
-    SCRIPTED model, which proves the mechanism -- the right specialist
-    runs, events come out in one unbroken sequence, the approval pause
-    crosses the subgraph boundary in both directions and a declined one
-    changes nothing -- and proves nothing about the model's judgement.
-    Routing quality belongs in M4 Task 8's metrics/agent-evals.json,
-    which is not built. Turning it on is a Railway variable, which is
-    the operator's to set.
+    VERIFIED LIVE 2026-09-05 with AGENT_MODE=team, and it took three
+    fixes to get there -- none of which the suite could have caught.
+
+    WHAT THE FIRST LIVE TURN SHOWED. "do you sell any laptops?" came
+    back with the answer TWICE, in different words, above the chips that
+    produced it. Two separate leaks of the same mistake -- treating a
+    specialist as though it talks to the customer:
+
+      * its `message` event was forwarded up with its tool events, so
+        the chat rendered the specialist's answer AND the supervisor's;
+
+      * it was driven by the server's model call, which carries
+        on_delta -- and on_delta pushes prose fragments STRAIGHT to the
+        browser, bypassing the graph and every filter in it. A
+        specialist now gets a model call with no on_delta, because
+        nothing downstream can take a sent fragment back.
+
+    The odd ORDER had the same cause and was arithmetic, not rendering:
+    the specialist's message was numbered seq 3 while the tool_completed
+    closing the delegation was seq 4, so its answer appeared before the
+    chip that produced it resolved. Fixed by not forwarding it at all.
+
+    THEN THE CHIPS ARRIVED IN ONE BURST, and that bug was older than
+    multi-agent. Events reached the browser from a sweep of accumulated
+    state after each NODE returned, so everything a node produced landed
+    together -- meaning a tool chip could only ever be drawn ALREADY
+    RESOLVED. With one tool that is nearly invisible; with a supervisor,
+    a specialist and two tools it is four chips appearing at once, all
+    saying "done". Nodes now hand each event over as they produce it.
+
+    DEDUPLICATED BY SEQ, NOT BY A COUNT, and that is the load-bearing
+    part. Events now arrive twice -- once live, once from the sweep that
+    remains as a backstop -- so something must collapse them. A running
+    count could not survive the node re-run after an approval pause;
+    seq is derived from state, so a re-run produces identical numbers
+    and the dedupe is exact. The property was already there for a
+    different reason, and it is what made this change safe.
+
+    Mutation-tested again for that change alone: 5 applied, 5 caught,
+    including the two that would have been worst -- dedupe removed (every
+    event twice) and the live renumbering drifting one ahead of the
+    stored list.
+
+    WHAT IS VERIFIED, PRECISELY: one read path, by hand, in a browser.
+    The product specialist was asked for laptops, one chip opened inside
+    another, and a single answer streamed after them. That is an
+    anecdote, not a measurement.
+
+    STILL NOT VERIFIED LIVE, and it is the one that matters most:
+    THE CANCELLATION. cancel_order runs inside the order specialist, one
+    level below where interrupt() was proven to work. The approval pause
+    is tested in both directions -- granted and declined -- but against a
+    SCRIPTED model. Nothing has yet raised that pause against the real
+    one.
+
+    ROUTING QUALITY IS STILL ASSERTED NOWHERE. The tests script the
+    model, so they prove the mechanism and nothing about its judgement.
+    That belongs in M4 Task 8's metrics/agent-evals.json, which is not
+    built.
 
     A SPECIALIST HAS NO MEMORY OF ITS OWN, turn to turn. Only the
     supervisor's transcript is stored and replayed, so a specialist

@@ -58,7 +58,7 @@ TWO SERVICES FROM ONE CODEBASE, deployed as separate processes.
                     request parameters stay under this project's control
     HTTP client     httpx 0.28.1
     Validation      Pydantic 2.13.5
-    Tests           pytest + respx - 313 tests
+    Tests           pytest + respx - 357 tests
     Live at         mcp-production-e344.up.railway.app
                     agent-production-79c8.up.railway.app
 
@@ -281,7 +281,7 @@ This server runs streamable HTTP on $PORT, with per-request authentication.
     tools/cart.py             get_cart, add_to_cart, remove_from_cart
     scripts/sweep.py          Exercises every tool against a live    (263)
                               deployment
-    tests/                    313 tests, one module per source module
+    tests/                    357 tests, one module per source module
 
 THE tools/ SPLIT IS DELIBERATE AND GETS REUSED. In Phase 3 each file becomes
 one specialist agent's toolbox - products.py for a Product agent, and so on. It
@@ -396,7 +396,7 @@ public domain. The fix is a condition in the storefront's middleware.
 11. TESTING
 ================================================================================
 
-313 tests, no network access, one module per source module:
+357 tests, no network access, one module per source module:
 
     MODULE                    TESTS   COVERS
     ------------------------  ------  ---------------------------------------
@@ -565,18 +565,58 @@ Four things about it are deliberate:
     counted -- which is what makes a node re-run after an approval pause
     produce the same numbers twice.
 
-NOT VERIFIED LIVE. Everything above is the local suite (352 tests), a
-mutation run, and a spike proving interrupt() survives a subgraph. The two
-limits that follow say what that leaves open.
+VERIFIED LIVE 2026-09-05 with AGENT_MODE=team on the deployed service:
+"do you sell any laptops?" produced an "Asking the product specialist"
+chip with a "Searching products" chip nested inside it, and ONE answer
+naming a real product. Getting there took three fixes that no local test
+could have caught -- see the record in docs/PLAN_M4_AGENT.txt.
+
+The cancellation path is still unverified live: cancel_order runs one
+level down inside the order specialist, and while the approval pause is
+tested in both directions against a scripted model, nothing has yet
+raised it against the real one.
+
+ONLY THE SUPERVISOR SPEAKS TO THE CUSTOMER. A specialist answers the
+SUPERVISOR, and that answer travels back as a tool result. Two things
+enforce it, and both had to be added after the chat showed the
+specialist's answer and the supervisor's, one after the other:
+
+  * the delegate node drops a specialist's `message` events and forwards
+    only its tool events -- "Searching products" inside "Asking the
+    product specialist" is the visible working the chips are for;
+
+  * a specialist is driven by a model call with NO on_delta. on_delta
+    pushes prose fragments STRAIGHT to the browser, bypassing the graph
+    and every filter in it, so this is the only place it can be stopped.
+
+EVENTS ARE HANDED OVER AS A NODE PRODUCES THEM, not when it returns.
+Publishing used to read accumulated state after each node, so a tool chip
+could only ever be drawn already resolved. Deduplicated by SEQ rather
+than by a count: seq is derived from state, so the node re-run after an
+approval pause produces the same numbers on both passes, which a running
+count could not have survived.
 
 
-MULTI-AGENT MODE IS BUILT BUT UNPROVEN AGAINST A REAL MODEL. AGENT_MODE=team
-is unit-tested with a SCRIPTED model, which proves the mechanism -- the right
-specialist runs, events come out in one unbroken sequence, the approval pause
-crosses the subgraph boundary in both directions -- and proves nothing about
-whether the model routes sensibly. Routing quality belongs in M4 Task 8's
-metrics/agent-evals.json, which is not built. The deployed service runs
-AGENT_MODE=single.
+ROUTING QUALITY IS ASSERTED NOWHERE. The multi-agent tests script the
+model, so they prove the MECHANISM -- the right specialist runs, events
+come out in one unbroken sequence, the approval pause crosses the
+subgraph boundary in both directions -- and prove nothing about whether
+the model routes sensibly. One live read path has been walked by hand;
+that is an anecdote, not a measurement. Routing quality belongs in M4
+Task 8's metrics/agent-evals.json, which is not built.
+
+THE CANCELLATION PATH HAS NOT BEEN RUN LIVE IN TEAM MODE. cancel_order
+sits inside the order specialist, one level below where interrupt() is
+known to work, and the tests that cover it use a scripted model. It is
+the single most important thing left to verify by hand.
+
+A SCRIPTED MODEL CANNOT SEE TIME. Three bugs shipped past a green suite
+because every assertion was about FINAL STATE: a duplicated answer,
+a specialist's tokens streaming to the customer, and every chip in a
+delegation arriving at once. The suite now asserts ARRIVAL ORDER as well
+-- what the caller had been handed at the moment a tool ran -- but the
+lesson generalises past those three: an assertion about the end of a turn
+says nothing about what watching it was like.
 
 A SPECIALIST HAS NO MEMORY OF ITS OWN, turn to turn. Only the supervisor's
 transcript is stored and replayed, so a specialist starts every delegation

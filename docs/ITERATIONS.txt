@@ -564,6 +564,24 @@ wrapper that raises before the executor is reached, and ToolError
 specifically, so a specialist reaching too far becomes a recoverable step
 rather than a dead conversation.
 
+A GREEN SUITE SAID NOTHING ABOUT WHAT USING IT WAS LIKE. Team mode
+passed 352 tests, a nine-mutation run and a subgraph spike, and then
+failed three times in a row in front of a person the first time it was
+actually used: the specialist's answer appeared twice, its tokens
+streamed into the chat ahead of the real reply, and every chip in a
+delegation landed in one burst already saying "done". None of the three
+was reachable from the suite, and for one reason -- a scripted model has
+no on_delta and every assertion was about FINAL STATE. The turn ended
+correctly every time. Watching it was the broken part, and nothing was
+watching. The suite now asserts arrival ORDER: what the caller had been
+handed at the moment a tool ran, not merely what it held at the end.
+
+THE THIRD BUG HAD BEEN THERE ALL ALONG. Events were published after each
+NODE returned, so a tool chip could only ever be drawn already resolved
+-- true since the single agent shipped, invisible with one tool, and
+obvious the moment four chips landed together. Multi-agent did not cause
+it; it raised the volume until somebody noticed.
+
     IN PLAIN TERMS
     Before building on an assumption, spend twenty minutes proving it,
     and keep the proof. When you deliberately break your own code and
@@ -571,6 +589,11 @@ rather than a dead conversation.
     missing" but "was that code doing anything at all" -- here it was
     not, and only breaking it revealed that. And a rule enforced by
     hoping the model does not notice a tool is not a rule.
+
+    The last one is the one worth carrying to the next project: the
+    tests all passed and the thing was still wrong to use, because
+    every test asked "did it end correctly" and nobody had asked "what
+    was it like while it was happening".
 
 
 ================================================================================
