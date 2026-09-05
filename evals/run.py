@@ -16,6 +16,7 @@ that reason.
 """
 
 import argparse
+from collections import Counter
 import asyncio
 import json
 import sys
@@ -32,7 +33,10 @@ from agent.loop import (
     run_turn,
     session_scoped_executor,
 )
+from agent.delegation import is_delegation, member_for_tool
+from agent.team import TEAM
 from agent.tools import AGENT_TOOLS, list_openai_tools, to_openai_tool
+from agent_server import _turn_setup
 from evals.fixtures import Fixture, load_all
 from evals.score import RunResult, score_run, skipped_workflow
 
@@ -217,6 +221,30 @@ def tools_of(state) -> list[str]:
         event["data"]["tool"]
         for event in state["events"]
         if event["type"] in ("tool_started", "approval_required")
+        # A DELEGATION IS NOT A SHOP ACTION. In team mode the supervisor's
+        # tools ARE the specialists, so ask_product arrives as an ordinary
+        # tool_started -- and every fixture's expectations are written
+        # about shop tools. Scoring the hand-off as an unexpected call
+        # would fail every fixture in team mode for routing correctly.
+        # What the specialists then did is in this list already, because
+        # the delegate node forwards their tool events.
+        and not is_delegation(event["data"]["tool"])
+    ]
+
+
+def delegations_of(state) -> list[str]:
+    """Which specialists were asked, in order. Empty in single mode.
+
+    ROUTING, MEASURED. This is the thing the multi-agent work had no
+    number for: whether a request reaches the right specialist is the
+    supervisor's whole job, and until now it was asserted only by unit
+    tests over a scripted model.
+    """
+    return [
+        member_for_tool(event["data"]["tool"]).name
+        for event in state["events"]
+        if event["type"] == "tool_started"
+        and is_delegation(event["data"]["tool"])
     ]
 
 
@@ -228,9 +256,22 @@ def approvals_of(state) -> list[str]:
     ]
 
 
-async def one_run(fixture: Fixture, token: str, live_tools: list[dict]):
+async def one_run(fixture: Fixture, token: str, live_tools: list[dict], setup, specialist_tools):
+    """One scored turn, in whichever architecture `setup` describes.
+
+    THE MODE COMES FROM agent_server._turn_setup, not from a second copy
+    of the rule here. An eval harness that decided for itself what "team
+    mode" meant could report on an architecture the server never runs --
+    which is the exact failure this re-run exists to correct, the last
+    numbers having measured the single agent two days after the team
+    shipped.
+    """
     usage: list = []
     started = time.monotonic()
+
+    # The supervisor holds delegation tools and no shop tools; the single
+    # agent holds the whole toolbox. Same call either way.
+    turn_tools = live_tools if setup.tool_names else setup.delegation
 
     if fixture.is_live:
         async with session_scoped_executor(token) as session:
@@ -238,17 +279,36 @@ async def one_run(fixture: Fixture, token: str, live_tools: list[dict]):
                 fixture.utterance,
                 model_call=openai_model_call(on_usage=usage.append),
                 execute_tool=session.execute,
-                tools=live_tools,
+                tools=turn_tools,
                 approve=approver(fixture),
                 session_id=session.session_id,
+                build=setup.build,
+                system_prompt=setup.system_prompt,
+                specialist_tools=specialist_tools,
             )
     else:
+        stubbed = stub_tools()
         state = await run_turn(
             fixture.utterance,
             model_call=openai_model_call(on_usage=usage.append),
             execute_tool=stub_executor(fixture.stub),
-            tools=stub_tools(),
+            tools=stubbed if setup.tool_names else setup.delegation,
             approve=approver(fixture),
+            build=setup.build,
+            system_prompt=setup.system_prompt,
+            # A stubbed specialist is shown the same surface a live one
+            # is, filtered to its own set -- including the tools it must
+            # not call, or the fixture could not detect the wrong choice.
+            specialist_tools={
+                member.name: [
+                    tool
+                    for tool in stubbed
+                    if tool["function"]["name"] in member.tools
+                ]
+                for member in TEAM
+            }
+            if setup.specialist_tool_names
+            else {},
         )
 
     elapsed_ms = (time.monotonic() - started) * 1000
@@ -260,20 +320,26 @@ async def one_run(fixture: Fixture, token: str, live_tools: list[dict]):
         fixture, tools_of(state), approvals_of(state), state.get("answer")
     )
 
-    return result, elapsed_ms, usage, state.get("answer") or ""
+    return result, elapsed_ms, usage, state.get("answer") or "", delegations_of(state)
 
 
-async def run_fixture(fixture: Fixture, token: str, live_tools, runs: int) -> dict:
+async def run_fixture(
+    fixture: Fixture, token: str, live_tools, runs: int, setup, specialist_tools
+) -> dict:
     print(f"\n===== {fixture.name} ({'live' if fixture.is_live else 'stubbed'}) =====")
     print(f"  {fixture.utterance.strip()}")
 
     results: list[RunResult] = []
     timings: list[float] = []
+    routed: list[str] = []
     prompt_tokens = 0
     completion_tokens = 0
 
     for index in range(runs):
-        result, elapsed_ms, usage, answer = await one_run(fixture, token, live_tools)
+        result, elapsed_ms, usage, answer, delegations = await one_run(
+            fixture, token, live_tools, setup, specialist_tools
+        )
+        routed.extend(delegations)
 
         results.append(result)
         timings.append(elapsed_ms)
@@ -300,6 +366,11 @@ async def run_fixture(fixture: Fixture, token: str, live_tools, runs: int) -> di
         "p95": percentile(timings, 95),
         "promptTokens": round(prompt_tokens / runs),
         "completionTokens": round(completion_tokens / runs),
+        # Which specialists this request reached, counted across runs.
+        # Empty in single mode. This is the routing evidence the
+        # multi-agent work shipped without.
+        "specialistsAsked": dict(Counter(routed)),
+        "delegationsPerRun": round(len(routed) / runs, 2),
     }
 
 
@@ -308,6 +379,12 @@ async def main() -> int:
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--only", default=None, help="one fixture name")
     parser.add_argument("--gate", action="store_true", help="exit 1 on any passRate < 1")
+    parser.add_argument(
+        "--mode",
+        default=config.AGENT_MODE,
+        choices=["single", "team"],
+        help="which architecture to measure; defaults to AGENT_MODE",
+    )
     args = parser.parse_args()
 
     fixtures = load_all(WORKFLOWS)
@@ -318,7 +395,17 @@ async def main() -> int:
             return 2
 
     token = await bearer_token()
-    live_tools = await list_openai_tools(token, only=AGENT_TOOLS)
+    setup = _turn_setup(args.mode)
+
+    live_tools = (
+        await list_openai_tools(token, only=setup.tool_names)
+        if setup.tool_names
+        else []
+    )
+    specialist_tools = {
+        name: await list_openai_tools(token, only=names)
+        for name, names in setup.specialist_tool_names.items()
+    }
 
     workflows = {}
     for fixture in fixtures:
@@ -330,7 +417,7 @@ async def main() -> int:
             continue
 
         workflows[fixture.name] = await run_fixture(
-            fixture, token, live_tools, args.runs
+            fixture, token, live_tools, args.runs, setup, specialist_tools
         )
 
     report = {
@@ -338,13 +425,19 @@ async def main() -> int:
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z"),
         "model": config.OPENAI_MODEL,
+        # WHICH ARCHITECTURE THIS MEASURED. Absent before, and its absence
+        # was the flaw: a report that does not name its subject cannot be
+        # told apart from a stale one, and the previous file described the
+        # single agent two days after the team shipped.
+        "mode": args.mode,
         "runs": args.runs,
         "workflows": workflows,
     }
 
-    OUTPUT.parent.mkdir(exist_ok=True)
-    OUTPUT.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(f"\nwrote {OUTPUT.relative_to(ROOT)}")
+    output = OUTPUT.with_name(f"agent-evals-{args.mode}.json")
+    output.parent.mkdir(exist_ok=True)
+    output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(f"\nwrote {output.relative_to(ROOT)}")
 
     failing = [
         name
