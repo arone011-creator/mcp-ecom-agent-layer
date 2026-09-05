@@ -757,9 +757,14 @@ async def test_run_turn_builds_the_graph_it_is_given():
     """
     built = []
 
-    def fake_build(model_call, execute_tool, checkpointer=None):
+    def fake_build(model_call, execute_tool, checkpointer=None, on_event=None):
+        # Signature matches the real builder exactly. A stand-in that is
+        # more forgiving than the thing it stands in for is a test that
+        # passes while production breaks.
         built.append("called")
-        return build_graph(model_call, execute_tool, checkpointer=checkpointer)
+        return build_graph(
+            model_call, execute_tool, checkpointer=checkpointer, on_event=on_event
+        )
 
     async def model_call(messages, tools):
         return _DumpableMessage({"role": "assistant", "content": "done"})
@@ -798,3 +803,98 @@ async def test_run_turn_seeds_the_system_prompt_it_is_given():
     )
 
     assert seen[0] == "You are the supervisor."
+
+
+# --- Events reach the customer as they happen, not per node ----------------
+#
+# _publish reads accumulated state after each NODE, so every event a node
+# produced arrived together: a tool chip was already "done" the first time
+# it was ever drawn. Invisible with one tool; with a supervisor delegating
+# to a specialist it is four chips landing in one burst.
+
+
+@pytest.mark.asyncio
+async def test_a_tool_chip_starts_before_the_tool_finishes():
+    """THE MUST PROVE. tool_started must reach the caller BEFORE the tool
+    has run, or the chip can only ever be drawn already resolved.
+    """
+    seen = []
+    order = []
+
+    async def model_call(messages, tools):
+        if any(m.get("role") == "tool" for m in messages):
+            return _DumpableMessage({"role": "assistant", "content": "done"})
+        return _DumpableMessage(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "get_cart", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+
+    async def execute_tool(name, arguments):
+        # What the caller had been handed by the time the tool ran.
+        order.append([e["type"] for e in seen])
+        return {"cart": {"items": []}}
+
+    await run_turn(
+        "what is in my cart",
+        model_call=model_call,
+        execute_tool=execute_tool,
+        on_event=seen.append,
+    )
+
+    assert order == [["tool_started"]], order
+
+
+@pytest.mark.asyncio
+async def test_no_event_is_handed_over_twice():
+    """The property the old count protected, kept under live emission.
+
+    Events are now published as nodes produce them AND accumulate in
+    state, so the state-driven publish would send them a second time if
+    it were not deduplicated. Deduplicated by seq rather than by count,
+    because seq is derived from state and is therefore the one identifier
+    that survives the node re-run after an approval pause.
+    """
+    seen = []
+
+    async def model_call(messages, tools):
+        if any(m.get("role") == "tool" for m in messages):
+            return _DumpableMessage({"role": "assistant", "content": "done"})
+        return _DumpableMessage(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "get_cart", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+
+    async def execute_tool(name, arguments):
+        return {"cart": {"items": []}}
+
+    state = await run_turn(
+        "what is in my cart",
+        model_call=model_call,
+        execute_tool=execute_tool,
+        on_event=seen.append,
+    )
+
+    numbers = [event["seq"] for event in seen]
+
+    assert len(numbers) == len(set(numbers)), numbers
+    # And nothing was LOST by deduplicating: the caller saw the whole
+    # stored transcript.
+    assert numbers == [event["seq"] for event in state["events"]]

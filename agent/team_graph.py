@@ -60,7 +60,11 @@ def _delegations(message: dict) -> list[tuple[str, str, str]]:
 
 
 def build_team_graph(
-    model_call, execute_tool, checkpointer=None, specialist_model_call=None
+    model_call,
+    execute_tool,
+    checkpointer=None,
+    specialist_model_call=None,
+    on_event=None,
 ):
     """The supervisor's graph, with specialists as subgraphs.
 
@@ -103,6 +107,9 @@ def build_team_graph(
         # blank bubble in the chat.
         events = [message_event(_next_seq(state), answer)] if answer else []
 
+        if events and on_event is not None:
+            on_event(events[0])
+
         return {"messages": [dumped], "answer": answer, "events": events}
 
     async def delegate(state: TurnState) -> dict:
@@ -113,6 +120,15 @@ def build_team_graph(
         # What the specialist read that the supervisor never will.
         seen: set[str] = set()
 
+        def record(event):
+            """Append it AND hand it over now, rather than on return."""
+            events.append(event)
+
+            if on_event is not None:
+                on_event(event)
+
+            return event
+
         for call_id, tool_name, request in requests:
             member = member_for_tool(tool_name)
 
@@ -120,14 +136,34 @@ def build_team_graph(
             # same numbers on the re-run that follows an approval pause.
             base = _next_seq(state) + len(events)
 
-            events.append(
-                tool_started(base, call_id, tool_name, {"request": request})
-            )
+            record(tool_started(base, call_id, tool_name, {"request": request}))
+
+            # The specialist's chips as they happen, not when it finishes.
+            # Without this the whole delegation -- the hand-off, every
+            # tool inside it, and its completion -- reached the browser in
+            # one burst when this node returned, so four chips appeared
+            # at once and every one of them already said "done".
+            #
+            # The SAME renumbering the authoritative list below uses, so
+            # the two agree and the sweep deduplicates them by seq. That
+            # keeps the sweep as a real backstop: a node that ever forgets
+            # to emit still reaches the customer, one step later.
+            forwarded = []
+
+            def collect(event, _kept=forwarded, _base=base):
+                if event["type"] == "message":
+                    return
+
+                _kept.append(event)
+
+                if on_event is not None:
+                    on_event(dict(event, seq=_base + len(_kept)))
 
             specialist = build_graph(
                 specialist_model_call,
                 restricted_executor(execute_tool, member.tools),
                 checkpointer=checkpointer,
+                on_event=collect,
             )
 
             result = await specialist.ainvoke(
@@ -186,7 +222,7 @@ def build_team_graph(
             )
 
             events.extend(sub_events)
-            events.append(
+            record(
                 tool_completed(
                     base + 1 + len(sub_events),
                     call_id,

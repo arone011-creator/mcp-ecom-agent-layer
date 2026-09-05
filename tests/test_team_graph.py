@@ -751,3 +751,97 @@ async def test_a_specialist_can_be_given_its_own_model_call():
     # The specialist ran, and it ran on the SILENT call.
     assert "silent" in used
     assert used == ["speaking", "silent", "speaking"], used
+
+
+@pytest.mark.asyncio
+async def test_a_delegations_chips_arrive_one_at_a_time():
+    """THE MUST PROVE for the burst.
+
+    The whole delegation used to reach the browser when the delegate node
+    RETURNED -- so the hand-off, the specialist's tool call and both
+    completions appeared together, every chip already saying "done".
+    What should happen is what actually happens: the hand-off opens, the
+    tool inside it opens and closes, then the hand-off closes.
+    """
+    seen = []
+    during = []
+
+    async def execute_tool(name, arguments):
+        # What the customer had been shown by the time the tool ran.
+        during.append([(e["seq"], e["type"]) for e in seen])
+        return {"products": []}
+
+    supervisor = _scripted(
+        [
+            _assistant("ask_product", "find laptops"),
+            {"role": "assistant", "content": "Nothing found."},
+        ]
+    )
+    specialist = _scripted(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_s1",
+                        "type": "function",
+                        "function": {"name": "search_products", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "Nothing found."},
+        ]
+    )
+
+    async def model_call(messages, tools):
+        names = {tool["function"]["name"] for tool in tools}
+        if any(name.startswith("ask_") for name in names):
+            return await supervisor(messages, tools)
+        return await specialist(messages, tools)
+
+    app = build_team_graph(
+        model_call,
+        execute_tool,
+        checkpointer=InMemorySaver(),
+        on_event=seen.append,
+    )
+    state = await app.ainvoke(
+        {
+            "messages": [{"role": "user", "content": "find laptops"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ask_product",
+                        "description": "products",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            "specialist_tools": {
+                "product": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "search_products",
+                            "description": "search",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ]
+            },
+            "events": [],
+            "failed": [],
+            "seeded": 1,
+        },
+        config={"configurable": {"thread_id": "t-live"}},
+    )
+
+    # MID-FLIGHT: the hand-off and the inner tool were both already
+    # showing, and neither had completed.
+    assert during == [[(0, "tool_started"), (1, "tool_started")]], during
+
+    # AND NOTHING WAS LOST. What was streamed is what was stored.
+    assert [e["seq"] for e in seen] == [e["seq"] for e in state["events"]]
+    assert len(seen) == len({e["seq"] for e in seen})

@@ -129,24 +129,48 @@ async def _decide(
         return [{"approved": False, "reason": "expired"} for _ in requests]
 
 
-def _publish(on_event, state: TurnState, already: int) -> int:
-    """Hand the caller every event appended since it was last called.
+def _emitter(on_event):
+    """One place an event becomes visible to the caller, and exactly once.
 
-    Driven by the accumulated length rather than by the nodes, which
-    cannot see the caller. The count is what makes publishing idempotent
-    across steps: each event is handed over exactly once, however often
-    this is called.
+    DEDUPLICATED BY SEQ RATHER THAN COUNTED, and the reason is the whole
+    of this design. Events are now handed over as a node PRODUCES them --
+    otherwise a tool chip could only ever be drawn already resolved,
+    because the state a node returns arrives all at once -- and they also
+    accumulate in state, where the sweep below would send them a second
+    time.
+
+    seq is derived from state rather than counted, so the node re-run
+    that follows an approval pause produces the SAME numbers on both
+    passes. That makes it the one identifier a re-run cannot duplicate,
+    which a running count could not survive.
     """
-    events = state.get("events", [])
+    seen: set[int] = set()
 
-    if on_event is not None:
-        for event in events[already:]:
+    def emit(event) -> None:
+        seq = event.get("seq")
+
+        if seq in seen:
+            return
+
+        seen.add(seq)
+
+        if on_event is not None:
             on_event(event)
 
-    return len(events)
+    return emit
 
 
-async def _drive(app, payload, settings, on_event, published: int):
+def _publish(emit, state: TurnState) -> None:
+    """The sweep. Catches anything a node produced without emitting it.
+
+    Belt and braces on purpose: a node that forgets to emit still reaches
+    the caller here, one step later, rather than never.
+    """
+    for event in state.get("events", []):
+        emit(event)
+
+
+async def _drive(app, payload, settings, emit):
     """Run the graph to its next stopping point, publishing as it goes.
 
     astream rather than ainvoke, and that is the whole point. ainvoke
@@ -163,9 +187,9 @@ async def _drive(app, payload, settings, on_event, published: int):
 
     async for step in app.astream(payload, config=settings, stream_mode="values"):
         state = step
-        published = _publish(on_event, step, published)
+        _publish(emit, step)
 
-    return state, published
+    return state
 
 
 def _next_seq(state: TurnState) -> int:
@@ -195,6 +219,7 @@ def build_graph(
     model_call: ModelCall | None = None,
     execute_tool: ToolExecutor | None = None,
     checkpointer=None,
+    on_event=None,
 ):
     """The turn as a graph.
 
@@ -223,6 +248,9 @@ def build_graph(
         # A tool turn has no prose, and an empty message event would be a
         # blank bubble in the chat.
         events = [message_event(_next_seq(state), answer)] if answer else []
+
+        if events and on_event is not None:
+            on_event(events[0])
 
         return {"messages": [dumped], "answer": answer, "events": events}
 
@@ -255,11 +283,25 @@ def build_graph(
         events = []
         decisions = {}
 
+        def record(event):
+            """Append it AND hand it over now.
+
+            Now, rather than when this node returns, because a chip only
+            ever drawn after its tool has finished is a chip only ever
+            drawn done.
+            """
+            events.append(event)
+
+            if on_event is not None:
+                on_event(event)
+
+            return event
+
         for call_id, name, arguments in parsed:
             if name not in HIGH_RISK_TOOLS:
                 continue
 
-            events.append(approval_required_event(seq, call_id, name, arguments))
+            record(approval_required_event(seq, call_id, name, arguments))
             seq += 1
 
             # Pauses the thread on the first pass; returns the resume
@@ -288,11 +330,11 @@ def build_graph(
                 # No tool_started: it never started. The completion still
                 # fires so the UI resolves the card rather than leaving it
                 # open forever.
-                events.append(tool_completed(seq, call_id, name, error=declined))
+                record(tool_completed(seq, call_id, name, error=declined))
                 seq += 1
                 continue
 
-            events.append(tool_started(seq, call_id, name, arguments))
+            record(tool_started(seq, call_id, name, arguments))
             seq += 1
 
             if signature in already_failed:
@@ -304,7 +346,7 @@ def build_graph(
                 results.append(_tool_message(call_id, {"error": refusal}))
                 # Emitted even though nothing ran: a start without a
                 # completion is a chip that spins forever.
-                events.append(tool_completed(seq, call_id, name, error=refusal))
+                record(tool_completed(seq, call_id, name, error=refusal))
                 seq += 1
                 continue
 
@@ -324,12 +366,12 @@ def build_graph(
                 # be a second implementation of someone else's rule.
                 newly_failed.append(signature)
                 results.append(_tool_message(call_id, {"error": str(failure)}))
-                events.append(tool_completed(seq, call_id, name, error=str(failure)))
+                record(tool_completed(seq, call_id, name, error=str(failure)))
                 seq += 1
                 continue
 
             results.append(_tool_message(call_id, result))
-            events.append(tool_completed(seq, call_id, name, result=result))
+            record(tool_completed(seq, call_id, name, result=result))
             seq += 1
 
         return {"messages": results, "failed": newly_failed, "events": events}
@@ -388,10 +430,10 @@ async def run_turn(
     # publish accounting, the interrupt loop that waits for a human -- is
     # identical for one agent and for a team, and the approval pause is
     # the last thing in this system that should exist in two copies.
+    emit = _emitter(on_event)
     app = (build or build_graph)(
-        model_call, execute_tool, checkpointer=InMemorySaver()
+        model_call, execute_tool, checkpointer=InMemorySaver(), on_event=emit
     )
-    published = 0
 
     # Refused, not filtered, and refused BEFORE the graph is built: a turn
     # that has already begun cannot un-send a message it was seeded with.
@@ -407,7 +449,7 @@ async def run_turn(
         "configurable": {"thread_id": uuid.uuid4().hex},
     }
 
-    state, published = await _drive(
+    state = await _drive(
         app,
         {
             "messages": [
@@ -427,8 +469,7 @@ async def run_turn(
             "seeded": 1 + len(replayed),
         },
         settings,
-        on_event,
-        published,
+        emit,
     )
 
     while state.get("__interrupt__"):
@@ -443,12 +484,11 @@ async def run_turn(
         else:
             decisions = await _decide(approve, requests, approval_timeout_seconds)
 
-        state, published = await _drive(
+        state = await _drive(
             app,
             Command(resume=decisions[0] if len(decisions) == 1 else decisions),
             settings,
-            on_event,
-            published,
+            emit,
         )
 
     return state
