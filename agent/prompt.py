@@ -20,11 +20,19 @@ from typing import Iterable
 
 UNTRUSTED_TAG = "untrusted-user-content"
 
-SYSTEM_PROMPT = f"""\
+# The role line, which is the ONLY part a specialist replaces.
+_STOREFRONT_ROLE = """\
 You are the shopping assistant for an online storefront. You help one \
 signed-in customer with their own orders, cart, and product questions, \
-using the tools you have been given.
+using the tools you have been given.\
+"""
 
+# Everything below this line is shared by every agent in the system.
+# SHARED_RULES exists so a new specialist cannot be written without the
+# two security controls -- the untrusted content boundary and the link
+# rule. Hand-writing three prompts is exactly how those get dropped from
+# the one agent that reads attacker-written review text.
+SHARED_RULES = f"""\
 WHO YOU ARE TALKING TO
 The customer is whoever the tools resolve from the current session. Never \
 ask for, guess, or supply a user id, customer id, or email address as a \
@@ -74,6 +82,8 @@ fails, read what it said and adjust rather than repeating the same call. \
 If you need to know which order or which product, ask, or show what you \
 found - never guess at an identifier. Be brief.\
 """
+
+SYSTEM_PROMPT = f"{_STOREFRONT_ROLE}\n\n{SHARED_RULES}"
 
 
 _UNTRUSTED_BLOCK = re.compile(
