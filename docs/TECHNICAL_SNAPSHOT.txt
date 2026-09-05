@@ -497,6 +497,18 @@ KNOWN LIMITS, EACH REAL
     has a deadline at all: the timeout bounds a real server-side resource,
     not merely an idle task.
 
+  * THE AGENT CANNOT RESOLVE AN ORDER NUMBER TO AN ORDER ID. Asked to
+    cancel "ORD-123" it passes that number as cancel_order's order_id, which
+    matches no row, so the approval card cannot load its details and
+    correctly refuses to describe anything. The card is doing its job -- it
+    exists so a confirmation cannot describe one order while another is
+    cancelled -- but the agent should look the number up first. Found
+    2026-09-05, and it is the reason the cancel-a-shipped-order refusal has
+    still never been provoked end to end: the attempt never reached the
+    tool. The storefront's simulated order lifecycle now makes an order
+    reach SHIPPED in two minutes, so the mechanism to provoke it finally
+    exists once this is fixed.
+
   * REPLAYED HISTORY IS TRUSTED ONLY AS FAR AS ITS ROLES. sanitise_history
     accepts exactly the three roles a turn can produce and refuses the
     request otherwise -- an allowlist, because the API already has a second

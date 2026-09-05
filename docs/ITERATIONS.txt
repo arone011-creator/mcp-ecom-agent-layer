@@ -548,6 +548,15 @@ active context made visible), task 8 (an agent section in the scorecard), and
 chat phase 6 (summarisation, so a long conversation degrades gracefully
 instead of dropping its oldest turns).
 
+TWO AGENT-SIDE BUGS FOUND ON 2026-09-05, neither caused by M4 work, both
+still open. The agent passes an order NUMBER where cancel_order's approval
+route expects an order id, so "cancel ORD-123" produces an approval card that
+cannot load its details -- and that card has no Decline button, so the turn
+waits out its five-minute deadline before the panel offers a way forward.
+Neither is unsafe: nothing is changed, and the card refusing to describe an
+order it could not load is exactly what it is for. Both are recorded in the
+snapshot's known limits.
+
     IN PLAIN TERMS
     The AI is built and working. Two of the three safety items booked in
     during Phase 1 are done. The third is not: product reviews are written by
