@@ -74,6 +74,15 @@ class TurnState(TypedDict, total=False):
     # `messages` many times. agent/history.py::exportable_context uses it
     # to send out only what this turn added.
     seeded: int
+    # Where this state's event numbering starts. Zero for a turn; for a
+    # specialist running as a subgraph it is the supervisor's next number,
+    # so one ordered stream comes out of several states.
+    #
+    # A BASE RATHER THAN A SHARED COUNTER, deliberately. _next_seq is
+    # derived from state so that a node re-run after an approval pause
+    # produces the same numbers on both passes; a mutable counter would
+    # hand out different ones the second time.
+    seq_base: int
 
 
 def _tool_calls_of(message: dict) -> list[dict]:
@@ -151,9 +160,13 @@ def _next_seq(state: TurnState) -> int:
     LangGraph nodes return only their additions, so a counter held in a
     node would restart on the next pass through it. The accumulated
     length is the one number both nodes can agree on without sharing
-    state of their own.
+    state of their own -- and being derived rather than counted is also
+    what makes it stable across the node re-run that follows an approval.
+
+    `seq_base` offsets the whole run, so a specialist's events land in the
+    supervisor's stream without colliding with it.
     """
-    return len(state.get("events", []))
+    return state.get("seq_base", 0) + len(state.get("events", []))
 
 
 def _tool_message(call_id: str, payload) -> dict:

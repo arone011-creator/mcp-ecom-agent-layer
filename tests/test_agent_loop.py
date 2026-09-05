@@ -693,3 +693,37 @@ async def test_a_url_from_an_earlier_turns_untrusted_content_is_still_redacted()
     )
 
     assert "evil.example.com" not in state["answer"]
+
+
+# --- Event numbering from a base (multi-agent Phase 3) ---------------------
+
+from agent.loop import _next_seq  # noqa: E402
+
+
+def test_events_are_numbered_from_the_start_by_default():
+    assert _next_seq({"events": []}) == 0
+    assert _next_seq({"events": [{}, {}]}) == 2
+
+
+def test_events_can_be_numbered_from_a_base():
+    """So a specialist's events slot into the supervisor's stream.
+
+    A specialist runs with its own state and its own empty events list.
+    Numbered from zero, its first event would collide with the
+    supervisor's first, and the storefront orders the whole transcript by
+    this number.
+    """
+    assert _next_seq({"events": [], "seq_base": 7}) == 7
+    assert _next_seq({"events": [{}, {}], "seq_base": 7}) == 9
+
+
+def test_the_number_is_derived_rather_than_counted():
+    """Which is what makes it survive a node re-run.
+
+    LangGraph re-runs a node from the top when a thread resumes after an
+    approval pause. A counter held anywhere but in the state would hand
+    out different numbers on the second pass for the same events.
+    """
+    state = {"events": [{}, {}, {}], "seq_base": 5}
+
+    assert _next_seq(state) == _next_seq(state) == 8
