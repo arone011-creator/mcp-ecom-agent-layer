@@ -49,3 +49,11 @@ APPROVAL_WAIT_SECONDS = float(os.environ.get("AGENT_APPROVAL_WAIT_SECONDS", "300
 RAILWAY_GIT_COMMIT_SHA = os.environ.get("RAILWAY_GIT_COMMIT_SHA", "")
 HTTP_TIMEOUT_SECONDS = float(os.environ.get("MCP_HTTP_TIMEOUT_SECONDS", "10"))
 PORT = int(os.environ.get("PORT", "8000"))
+
+# Which agent architecture a turn uses.
+#
+# DEFAULTS TO single, deliberately. The single-agent path is verified
+# live and working; the team path replaces it only once it has been
+# verified the same way. A routing mistake should not take a working demo
+# down, and the two share build_graph, so keeping both is cheap.
+AGENT_MODE = os.environ.get("AGENT_MODE", "single")

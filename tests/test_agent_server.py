@@ -722,3 +722,48 @@ async def test_naming_shows_the_model_both_halves_of_the_exchange(monkeypatch):
     assert "Two orders." in sent
     # And no tools: naming a chat cannot call anything.
     assert not seen.get("tools")
+
+
+# --- AGENT_MODE: single or team (multi-agent Phase 3) ----------------------
+
+from agent_server import _turn_setup  # noqa: E402
+
+
+def test_single_mode_offers_the_agent_the_whole_toolbox():
+    from agent.prompt import SYSTEM_PROMPT
+    from agent.tools import AGENT_TOOLS
+
+    setup = _turn_setup("single")
+
+    assert setup.tool_names == frozenset(AGENT_TOOLS)
+    assert setup.system_prompt == SYSTEM_PROMPT
+    assert setup.specialist_tool_names == {}
+
+
+def test_team_mode_gives_the_supervisor_no_shop_tools():
+    """THE MUST PROVE for the mode switch.
+
+    If the supervisor were handed the shop tools as well, cancel_order
+    would be back on every turn and the change would have bought nothing.
+    """
+    from agent.prompt import SUPERVISOR_PROMPT
+
+    setup = _turn_setup("team")
+
+    assert setup.tool_names == frozenset()
+    assert setup.system_prompt == SUPERVISOR_PROMPT
+
+
+def test_team_mode_lists_each_specialists_tools_separately():
+    setup = _turn_setup("team")
+
+    assert setup.specialist_tool_names["product"] == frozenset(
+        {"search_products", "get_product", "check_inventory"}
+    )
+    assert "cancel_order" not in setup.specialist_tool_names["product"]
+
+
+def test_an_unknown_mode_is_refused_rather_than_guessed():
+    """A typo in an environment variable must not silently pick a mode."""
+    with pytest.raises(ValueError):
+        _turn_setup("supervisor")

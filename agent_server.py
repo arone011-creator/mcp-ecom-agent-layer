@@ -29,6 +29,7 @@ import json
 import subprocess
 import traceback
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from starlette.applications import Starlette
@@ -43,8 +44,56 @@ from agent.events import error as error_event
 from agent.events import message_delta
 from agent.history import UnsafeHistory, exportable_context, sanitise_history
 from agent.loop import openai_model_call, run_turn, session_scoped_executor
+from agent.delegation import delegation_tools
+from agent.prompt import SUPERVISOR_PROMPT, SYSTEM_PROMPT
+from agent.team import TEAM
+from agent.team_graph import build_team_graph
 from agent.titles import clean_title, name_conversation
 from agent.tools import AGENT_TOOLS, list_openai_tools
+
+
+@dataclass(frozen=True)
+class TurnSetup:
+    """Everything the mode decides, in one value.
+
+    Separated from the streaming code so the mode's consequences can be
+    asserted without running a turn -- above all that the supervisor is
+    offered no shop tools, which is the entire point of team mode.
+    """
+
+    tool_names: frozenset[str]
+    specialist_tool_names: dict[str, frozenset[str]]
+    system_prompt: str
+    build: object
+    delegation: list[dict]
+
+
+def _turn_setup(mode: str) -> TurnSetup:
+    if mode == "single":
+        return TurnSetup(
+            tool_names=frozenset(AGENT_TOOLS),
+            specialist_tool_names={},
+            system_prompt=SYSTEM_PROMPT,
+            build=None,
+            delegation=[],
+        )
+
+    if mode == "team":
+        return TurnSetup(
+            # NONE. The supervisor delegates and composes; it never
+            # touches the shop. A shop tool here would put cancel_order
+            # back on every turn.
+            tool_names=frozenset(),
+            specialist_tool_names={member.name: member.tools for member in TEAM},
+            system_prompt=SUPERVISOR_PROMPT,
+            build=build_team_graph,
+            delegation=delegation_tools(),
+        )
+
+    # Refused rather than defaulted: a typo in an environment variable
+    # picking an architecture silently is how the wrong one ends up in
+    # production without anyone noticing.
+    raise ValueError(f"AGENT_MODE must be 'single' or 'team', not {mode!r}")
 
 
 class TurnRegistry:
@@ -205,7 +254,20 @@ async def _stream_turn(utterance: str, token: str, history: list[dict] | None = 
     back.
     """
     queue: asyncio.Queue = asyncio.Queue()
-    tools = await list_openai_tools(token, only=AGENT_TOOLS)
+    setup = _turn_setup(config.AGENT_MODE)
+
+    # Listed once per turn rather than per delegation: list_tools opens an
+    # MCP connection, and doing that inside the graph would put a network
+    # round trip in the middle of every hand-off.
+    tools = (
+        await list_openai_tools(token, only=setup.tool_names)
+        if setup.tool_names
+        else setup.delegation
+    )
+    specialist_tools = {
+        name: await list_openai_tools(token, only=names)
+        for name, names in setup.specialist_tool_names.items()
+    }
 
     async with session_scoped_executor(token) as session:
         turn_id = registry.open(session.session_id)
@@ -249,6 +311,9 @@ async def _stream_turn(utterance: str, token: str, history: list[dict] | None = 
                     approve=approve,
                     session_id=session.session_id,
                     on_event=queue.put_nowait,
+                    build=setup.build,
+                    system_prompt=setup.system_prompt,
+                    specialist_tools=specialist_tools,
                 )
             except Exception:
                 # A TURN THAT DIES MUST SAY SO. The response has already
