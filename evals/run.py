@@ -131,10 +131,23 @@ async def unmet_preconditions(fixture: Fixture, token: str) -> str | None:
                 headers=headers,
             )
             orders = response.json()["data"]["orders"]
-            if not any(o["status"] in ("PENDING", "PROCESSING") for o in orders):
+
+            # THE MOST RECENT ONE, because that is what the fixture asks
+            # to cancel. Checking whether ANY order is cancellable scored
+            # the agent as failing 0/5 while it behaved correctly: the
+            # newest order was DELIVERED, the agent said so and declined,
+            # and the harness called that a miss because some OLDER order
+            # happened to be cancellable. Exactly the mistake this
+            # function's docstring was written about, made again one
+            # field over.
+            if not orders:
+                return "no orders at all"
+
+            newest = orders[0]
+            if newest["status"] not in ("PENDING", "PROCESSING"):
                 return (
-                    f"no cancellable order ({len(orders)} orders, all "
-                    f"{sorted({o['status'] for o in orders})})"
+                    f"most recent order is {newest['status']}, not cancellable "
+                    f"({len(orders)} orders seen)"
                 )
 
         if "rated_products" in fixture.requires:
