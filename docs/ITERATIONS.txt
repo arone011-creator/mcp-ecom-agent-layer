@@ -582,6 +582,15 @@ NODE returned, so a tool chip could only ever be drawn already resolved
 obvious the moment four chips landed together. Multi-agent did not cause
 it; it raised the volume until somebody noticed.
 
+MEASURING IT CHANGED THE ANSWER. The architecture was designed, built,
+mutation-tested, documented and deployed on argument alone. The first
+run of an eval harness that could see both architectures reported the
+team split as slower, dearer and less reliable than the single agent on
+the same fixtures, minutes apart -- while routing itself was perfect, 25
+of 25. Everything that felt like evidence beforehand had been about
+whether the mechanism worked, and none of it was about whether the
+mechanism was worth having. The full record is docs/METRICS.txt.
+
     IN PLAIN TERMS
     Before building on an assumption, spend twenty minutes proving it,
     and keep the proof. When you deliberately break your own code and

@@ -597,13 +597,13 @@ approval pause produces the same numbers on both passes, which a running
 count could not have survived.
 
 
-ROUTING QUALITY IS ASSERTED NOWHERE. The multi-agent tests script the
-model, so they prove the MECHANISM -- the right specialist runs, events
-come out in one unbroken sequence, the approval pause crosses the
-subgraph boundary in both directions -- and prove nothing about whether
-the model routes sensibly. One live read path has been walked by hand;
-that is an anecdote, not a measurement. Routing quality belongs in M4
-Task 8's metrics/agent-evals.json, which is not built.
+ROUTING IS NOW MEASURED, AND IT IS THE PART THAT WORKS. 25 of 25
+delegations reached the specialist that owns the domain. What the same
+run also showed is that the architecture AROUND the routing costs more
+than it returns on these fixtures -- slower, dearer and less reliable
+than the single agent it replaced. The numbers, and what they do and do
+not cover, are in docs/METRICS.txt, generated from the eval output
+rather than typed from it.
 
 THE CANCELLATION PATH HAS NOT BEEN RUN LIVE IN TEAM MODE. cancel_order
 sits inside the order specialist, one level below where interrupt() is
