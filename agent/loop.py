@@ -83,6 +83,11 @@ class TurnState(TypedDict, total=False):
     # produces the same numbers on both passes; a mutable counter would
     # hand out different ones the second time.
     seq_base: int
+    # Each specialist's OpenAI tool schemas, keyed by member name. Listed
+    # once per turn by the caller rather than per delegation: listing
+    # tools opens an MCP connection, and doing that inside the graph would
+    # put a network round trip in the middle of every hand-off.
+    specialist_tools: dict[str, list[dict]]
 
 
 def _tool_calls_of(message: dict) -> list[dict]:
