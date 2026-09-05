@@ -350,6 +350,9 @@ async def run_turn(
     approval_timeout_seconds: float = 300.0,
     session_id: str | None = None,
     on_event=None,
+    build=None,
+    system_prompt: str | None = None,
+    specialist_tools: dict[str, list[dict]] | None = None,
 ) -> TurnState:
     """One turn, start to finish, pausing for approval where required.
 
@@ -372,7 +375,13 @@ async def run_turn(
     the turn is over is not a stream, and the pause in the middle is
     exactly when a customer most needs to see something.
     """
-    app = build_graph(model_call, execute_tool, checkpointer=InMemorySaver())
+    # WHICH GRAPH, not which loop. Everything below -- the drive, the
+    # publish accounting, the interrupt loop that waits for a human -- is
+    # identical for one agent and for a team, and the approval pause is
+    # the last thing in this system that should exist in two copies.
+    app = (build or build_graph)(
+        model_call, execute_tool, checkpointer=InMemorySaver()
+    )
     published = 0
 
     # Refused, not filtered, and refused BEFORE the graph is built: a turn
@@ -393,7 +402,7 @@ async def run_turn(
         app,
         {
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
                 # Between the prompt and the new message, in that order.
                 # The prompt stays first whatever the storefront sends,
                 # and the customer's actual question stays last so it is
@@ -402,6 +411,7 @@ async def run_turn(
                 {"role": "user", "content": utterance},
             ],
             "tools": tools or [],
+            "specialist_tools": specialist_tools or {},
             "answer": None,
             "failed": [],
             "events": [],

@@ -727,3 +727,74 @@ def test_the_number_is_derived_rather_than_counted():
     state = {"events": [{}, {}, {}], "seq_base": 5}
 
     assert _next_seq(state) == _next_seq(state) == 8
+
+
+# --- One approval loop for both modes (multi-agent Phase 3) ----------------
+
+
+class _DumpableMessage:
+    """The shape openai_model_call returns: something with .model_dump()."""
+
+    def __init__(self, payload):
+        self._payload = payload
+        self.content = payload.get("content")
+
+    def model_dump(self, exclude_none=False):
+        return {
+            key: value
+            for key, value in self._payload.items()
+            if not exclude_none or value is not None
+        }
+
+
+@pytest.mark.asyncio
+async def test_run_turn_builds_the_graph_it_is_given():
+    """So the team mode reuses this function's approval loop rather than
+    growing a second copy of it.
+
+    The approval pause is the security boundary. Two implementations of
+    it is the one duplication this codebase cannot afford.
+    """
+    built = []
+
+    def fake_build(model_call, execute_tool, checkpointer=None):
+        built.append("called")
+        return build_graph(model_call, execute_tool, checkpointer=checkpointer)
+
+    async def model_call(messages, tools):
+        return _DumpableMessage({"role": "assistant", "content": "done"})
+
+    async def execute_tool(name, arguments):
+        return {}
+
+    state = await run_turn(
+        "hello",
+        model_call=model_call,
+        execute_tool=execute_tool,
+        build=fake_build,
+    )
+
+    assert built == ["called"]
+    assert state["answer"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_seeds_the_system_prompt_it_is_given():
+    """The supervisor's prompt is not the single agent's."""
+    seen = []
+
+    async def model_call(messages, tools):
+        seen.append(messages[0]["content"])
+        return _DumpableMessage({"role": "assistant", "content": "done"})
+
+    async def execute_tool(name, arguments):
+        return {}
+
+    await run_turn(
+        "hello",
+        model_call=model_call,
+        execute_tool=execute_tool,
+        system_prompt="You are the supervisor.",
+    )
+
+    assert seen[0] == "You are the supervisor."

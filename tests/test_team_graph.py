@@ -275,3 +275,160 @@ async def test_the_events_come_out_in_one_unbroken_sequence():
     assert numbers == list(range(numbers[0], numbers[0] + len(numbers))), (
         f"gaps: {numbers}"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_inside_a_specialist_still_waits_for_a_human():
+    """THE SECURITY MUST PROVE for the whole design.
+
+    cancel_order now runs one level down, inside the order specialist.
+    The pause has to travel up to the caller and the decision back down,
+    or the approval boundary is gone -- and gone silently, because the
+    cancel would simply proceed.
+    """
+    from agent.delegation import delegation_tools
+    from agent.loop import run_turn
+
+    asked = []
+    executed = []
+
+    async def execute_tool(name, arguments):
+        executed.append((name, arguments))
+        return {"cancelled": True}
+
+    supervisor = _scripted(
+        [
+            _assistant("ask_order", "cancel order o1"),
+            {"role": "assistant", "content": "Cancelled."},
+        ]
+    )
+    specialist = _scripted(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_c1",
+                        "type": "function",
+                        "function": {
+                            "name": "cancel_order",
+                            "arguments": json.dumps({"order_id": "o1"}),
+                        },
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "Order cancelled."},
+        ]
+    )
+
+    async def model_call(messages, tools):
+        names = {tool["function"]["name"] for tool in tools}
+        if any(name.startswith("ask_") for name in names):
+            return await supervisor(messages, tools)
+        return await specialist(messages, tools)
+
+    async def approve(request):
+        asked.append(request["tool"])
+        return {"approved": True, "token": "tok_1"}
+
+    state = await run_turn(
+        "cancel order o1",
+        model_call=model_call,
+        execute_tool=execute_tool,
+        tools=delegation_tools(),
+        build=build_team_graph,
+        system_prompt="You are the supervisor.",
+        specialist_tools={
+            "order": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "cancel_order",
+                        "description": "cancel",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+        },
+        approve=approve,
+    )
+
+    # A HUMAN WAS ASKED.
+    assert asked == ["cancel_order"]
+    # AND THE TOKEN THE HUMAN CAUSED WAS THE ONE SENT.
+    assert executed[0][0] == "cancel_order"
+    assert executed[0][1]["approval_token"] == "tok_1"
+    assert state["answer"] == "Cancelled."
+
+
+@pytest.mark.asyncio
+async def test_a_refused_cancellation_inside_a_specialist_changes_nothing():
+    """The other half. A pause that cannot be declined is not a pause."""
+    from agent.delegation import delegation_tools
+    from agent.loop import run_turn
+
+    executed = []
+
+    async def execute_tool(name, arguments):
+        executed.append(name)
+        return {"cancelled": True}
+
+    supervisor = _scripted(
+        [
+            _assistant("ask_order", "cancel order o1"),
+            {"role": "assistant", "content": "I did not cancel it."},
+        ]
+    )
+    specialist = _scripted(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_c1",
+                        "type": "function",
+                        "function": {
+                            "name": "cancel_order",
+                            "arguments": json.dumps({"order_id": "o1"}),
+                        },
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "It was not cancelled."},
+        ]
+    )
+
+    async def model_call(messages, tools):
+        names = {tool["function"]["name"] for tool in tools}
+        if any(name.startswith("ask_") for name in names):
+            return await supervisor(messages, tools)
+        return await specialist(messages, tools)
+
+    async def approve(request):
+        return {"approved": False}
+
+    await run_turn(
+        "cancel order o1",
+        model_call=model_call,
+        execute_tool=execute_tool,
+        tools=delegation_tools(),
+        build=build_team_graph,
+        system_prompt="You are the supervisor.",
+        specialist_tools={
+            "order": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "cancel_order",
+                        "description": "cancel",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+        },
+        approve=approve,
+    )
+
+    assert executed == [], "a declined cancellation still reached the tool"
