@@ -59,13 +59,26 @@ def _delegations(message: dict) -> list[tuple[str, str, str]]:
     return found
 
 
-def build_team_graph(model_call, execute_tool, checkpointer=None):
+def build_team_graph(
+    model_call, execute_tool, checkpointer=None, specialist_model_call=None
+):
     """The supervisor's graph, with specialists as subgraphs.
 
     A checkpointer is required for the same reason build_graph needs one:
     interrupt() writes the paused state through it, and here that pause
     starts one level down, inside a specialist.
+
+    A SPECIALIST GETS ITS OWN MODEL CALL, and that is not a detail. The
+    server's model call carries on_delta, which pushes prose fragments
+    STRAIGHT to the browser as they are written -- bypassing the graph and
+    every filter in it. Driving a specialist with it streams its private
+    working answer into the customer's chat, ahead of the supervisor's
+    real one. Passing a call without on_delta is the only thing that stops
+    that; there is nothing downstream to catch it.
+
+    Defaults to `model_call` so a test can pass one function and mean it.
     """
+    specialist_model_call = specialist_model_call or model_call
 
     async def supervisor(state: TurnState) -> dict:
         message = await model_call(state["messages"], state.get("tools", []))
@@ -112,7 +125,7 @@ def build_team_graph(model_call, execute_tool, checkpointer=None):
             )
 
             specialist = build_graph(
-                model_call,
+                specialist_model_call,
                 restricted_executor(execute_tool, member.tools),
                 checkpointer=checkpointer,
             )
@@ -147,7 +160,27 @@ def build_team_graph(model_call, execute_tool, checkpointer=None):
             # reader rather than protect the first.
             seen |= untrusted_urls(result.get("messages", []))
 
-            sub_events = result.get("events", [])
+            # A SPECIALIST'S PROSE IS NOT SHOWN TO THE CUSTOMER. It is
+            # answering the SUPERVISOR, and that answer travels back as
+            # the tool result below. Forwarding its `message` event too
+            # put a second bubble in the chat saying the same thing in
+            # different words -- and put it there BEFORE the delegation
+            # chip resolved, because the specialist's last event is
+            # numbered ahead of the tool_completed that closes it.
+            #
+            # Its TOOL events are kept: "Searching products" inside
+            # "Asking the product specialist" is exactly the visible
+            # working the chips are for.
+            #
+            # Renumbered rather than left with a hole, because the
+            # specialist numbered its events expecting all of them to be
+            # forwarded. Pairing is by call_id, so renumbering is safe.
+            sub_events = [
+                dict(event, seq=base + 1 + offset)
+                for offset, event in enumerate(
+                    e for e in result.get("events", []) if e["type"] != "message"
+                )
+            ]
             answer = result.get("answer") or (
                 "The specialist finished without an answer."
             )

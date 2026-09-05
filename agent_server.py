@@ -30,6 +30,7 @@ import subprocess
 import traceback
 import uuid
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from starlette.applications import Starlette
@@ -300,6 +301,15 @@ async def _stream_turn(utterance: str, token: str, history: list[dict] | None = 
             # as it did before fragments existed.
             queue.put_nowait(message_delta(fragment))
 
+        # ONLY THE SUPERVISOR SPEAKS TO THE CUSTOMER. A specialist is
+        # driven by a model call with NO on_delta, because on_delta pushes
+        # fragments straight to the browser and no filter downstream can
+        # take them back. Bound here rather than inside the graph: this is
+        # the only place that knows a browser is on the other end.
+        build = setup.build
+        if build is not None:
+            build = partial(build, specialist_model_call=openai_model_call())
+
         async def drive():
             try:
                 return await run_turn(
@@ -311,7 +321,7 @@ async def _stream_turn(utterance: str, token: str, history: list[dict] | None = 
                     approve=approve,
                     session_id=session.session_id,
                     on_event=queue.put_nowait,
-                    build=setup.build,
+                    build=build,
                     system_prompt=setup.system_prompt,
                     specialist_tools=specialist_tools,
                 )

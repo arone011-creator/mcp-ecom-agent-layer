@@ -598,3 +598,156 @@ async def test_the_supervisor_redacts_a_url_that_reached_it_second_hand():
 
     assert "https://evil.example/steal" not in state["answer"]
     assert REDACTION in state["answer"]
+
+
+# --- The specialist is a worker, not a speaker ------------------------------
+#
+# Found by running it live, not by these tests: the specialist's prose was
+# reaching the customer twice over -- once streamed through on_delta, once
+# as a forwarded `message` event -- so the chat showed the specialist's
+# answer AND the supervisor's, in that order, before the delegation chip
+# had even resolved.
+
+
+@pytest.mark.asyncio
+async def test_the_specialists_prose_never_reaches_the_customer():
+    """THE MUST PROVE for the fix.
+
+    A specialist answers the SUPERVISOR. Its answer travels as a tool
+    result, which is what the supervisor then writes a reply from. A
+    `message` event carrying it is a second bubble in the customer's
+    chat saying the same thing in different words.
+    """
+
+    async def execute_tool(name, arguments):
+        return {"products": [{"id": "p1", "name": "Laptop"}]}
+
+    supervisor = _scripted(
+        [
+            _assistant("ask_product", "find laptops"),
+            {"role": "assistant", "content": "We have a Laptop."},
+        ]
+    )
+    specialist = _scripted(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_s1",
+                        "type": "function",
+                        "function": {
+                            "name": "search_products",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "I found one laptop."},
+        ]
+    )
+
+    async def model_call(messages, tools):
+        names = {tool["function"]["name"] for tool in tools}
+        if any(name.startswith("ask_") for name in names):
+            return await supervisor(messages, tools)
+        return await specialist(messages, tools)
+
+    app = build_team_graph(model_call, execute_tool, checkpointer=InMemorySaver())
+    state = await app.ainvoke(
+        {
+            "messages": [{"role": "user", "content": "find laptops"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ask_product",
+                        "description": "products",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            "events": [],
+            "failed": [],
+            "seeded": 1,
+        },
+        config={"configurable": {"thread_id": "t-voice"}},
+    )
+
+    said = [e["data"]["text"] for e in state["events"] if e["type"] == "message"]
+
+    assert said == ["We have a Laptop."], said
+    assert "I found one laptop." not in said
+
+    # The specialist's answer still REACHES the supervisor -- as a tool
+    # result, which is the whole point of dropping the event.
+    tool_messages = [m for m in state["messages"] if m.get("role") == "tool"]
+    assert "I found one laptop." in json.loads(tool_messages[-1]["content"])["answer"]
+
+    # And the delegation chip still resolves AFTER the work inside it.
+    types = [(e["seq"], e["type"]) for e in state["events"]]
+    completions = [s for s, t in types if t == "tool_completed"]
+    message_seq = [s for s, t in types if t == "message"][0]
+    assert message_seq > max(completions), types
+
+
+@pytest.mark.asyncio
+async def test_a_specialist_can_be_given_its_own_model_call():
+    """Which is how its tokens are kept out of the customer's stream.
+
+    on_delta is wired into openai_model_call at the server and pushes
+    fragments STRAIGHT to the browser, bypassing the graph and every
+    filter in it. The only way a specialist's tokens stay private is for
+    it to be driven by a model call that has no on_delta at all.
+    """
+    used = []
+
+    async def execute_tool(name, arguments):
+        return {"products": []}
+
+    supervisor = _scripted(
+        [
+            _assistant("ask_product", "find laptops"),
+            {"role": "assistant", "content": "Nothing found."},
+        ]
+    )
+    specialist = _scripted([{"role": "assistant", "content": "Nothing found."}])
+
+    async def speaking(messages, tools):
+        used.append("speaking")
+        return await supervisor(messages, tools)
+
+    async def silent(messages, tools):
+        used.append("silent")
+        return await specialist(messages, tools)
+
+    app = build_team_graph(
+        speaking,
+        execute_tool,
+        checkpointer=InMemorySaver(),
+        specialist_model_call=silent,
+    )
+    await app.ainvoke(
+        {
+            "messages": [{"role": "user", "content": "find laptops"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ask_product",
+                        "description": "products",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            "events": [],
+            "failed": [],
+            "seeded": 1,
+        },
+        config={"configurable": {"thread_id": "t-silent"}},
+    )
+
+    # The specialist ran, and it ran on the SILENT call.
+    assert "silent" in used
+    assert used == ["speaking", "silent", "speaking"], used
