@@ -335,3 +335,22 @@ def test_the_shared_rules_carry_both_security_controls():
 def test_the_shared_rules_are_part_of_the_system_prompt():
     """Not a parallel copy that can drift from it."""
     assert SHARED_RULES in SYSTEM_PROMPT
+
+
+# --- The supervisor's prompt (multi-agent Phase 3) -------------------------
+
+from agent.prompt import SUPERVISOR_PROMPT  # noqa: E402
+
+
+def test_the_supervisor_carries_the_shared_security_rules():
+    """It reads specialists' answers, which carry untrusted content up."""
+    assert SHARED_RULES in SUPERVISOR_PROMPT
+
+
+def test_the_supervisor_is_told_it_has_no_tools_of_its_own():
+    assert "you have no tools of your own" in SUPERVISOR_PROMPT.lower()
+
+
+def test_the_supervisor_is_told_to_pass_identifiers_down():
+    """The specialist sees only the request, so a dropped id is a dead end."""
+    assert "self-contained" in SUPERVISOR_PROMPT.lower()
